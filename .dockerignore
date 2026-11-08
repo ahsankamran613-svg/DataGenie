@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.env
+.streamlit/secrets.toml
+data/*.db
+data/*.sqlite
+*.db
+*.sqlite

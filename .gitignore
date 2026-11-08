@@ -1,0 +1,45 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets & environment variables
+.env
+.env.local
+.streamlit/secrets.toml
+
+# Local SQLite databases & temporary artifacts
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/*.sqlite
+
+# Pytest & coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Test screenshots, verification media & browser artifacts
+screenshots/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+
+
+# Internal planning docs (optional)
+implementation_plan.md
+
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

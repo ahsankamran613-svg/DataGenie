@@ -1,0 +1,73 @@
+# DataGenie — Visual Theme Configuration
+# Dark theme (default): Oceanic Midnight Navy + Luminous Coral + Electric Sky Blue.
+# Inspired by Linear, Vercel, and Hex dark modes: high contrast, calm, breathable.
+# Light theme also supported via ⋮ (top-right menu) → Settings → Theme.
+
+[theme]
+base = "dark"
+primaryColor = "#FF6B6B"
+backgroundColor = "#0C1322"
+secondaryBackgroundColor = "#131E35"
+textColor = "#F1F5F9"
+borderColor = "#1E2F52"
+linkColor = "#38BDF8"
+codeBackgroundColor = "#14213B"
+dataframeHeaderBackgroundColor = "#14213B"
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap, sans-serif"
+headingFont = "Plus Jakarta Sans:https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&display=swap, sans-serif"
+codeFont = "JetBrains Mono:https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap, monospace"
+baseRadius = "0.75rem"
+buttonRadius = "0.75rem"
+showWidgetBorder = true
+showSidebarBorder = true
+chartCategoricalColors = ["#FF6B6B", "#38BDF8", "#34D399", "#FBBF24", "#F472B6", "#A78BFA"]
+
+[theme.sidebar]
+backgroundColor = "#080E1B"
+secondaryBackgroundColor = "#101A2F"
+textColor = "#F1F5F9"
+borderColor = "#182744"
+primaryColor = "#FF6B6B"
+linkColor = "#38BDF8"
+
+# ----------------------------------------------------------------- Dark ----
+# Palette: Oceanic Midnight Navy + Luminous Coral + Electric Sky Blue
+[theme.dark]
+primaryColor = "#FF6B6B"
+backgroundColor = "#0C1322"
+secondaryBackgroundColor = "#131E35"
+textColor = "#F1F5F9"
+linkColor = "#38BDF8"
+borderColor = "#1E2F52"
+codeBackgroundColor = "#14213B"
+dataframeHeaderBackgroundColor = "#14213B"
+chartCategoricalColors = ["#FF6B6B", "#38BDF8", "#34D399", "#FBBF24", "#F472B6", "#A78BFA"]
+
+[theme.dark.sidebar]
+backgroundColor = "#080E1B"
+secondaryBackgroundColor = "#101A2F"
+textColor = "#F1F5F9"
+borderColor = "#182744"
+primaryColor = "#FF6B6B"
+linkColor = "#38BDF8"
+
+# ---------------------------------------------------------------- Light ----
+# Palette: Clean Ice Slate + Sky Blue + Coral Red
+[theme.light]
+primaryColor = "#FF5A5F"
+backgroundColor = "#F4F8FC"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#0F1E36"
+linkColor = "#0284C7"
+borderColor = "#D4E3F2"
+codeBackgroundColor = "#E2EDF8"
+dataframeHeaderBackgroundColor = "#E2EDF8"
+chartCategoricalColors = ["#FF5A5F", "#0284C7", "#00B4D8", "#10B981", "#F59E0B", "#8B5CF6"]
+
+[theme.light.sidebar]
+backgroundColor = "#E6EFF7"
+secondaryBackgroundColor = "#FFFFFF"
+borderColor = "#CCE0F2"
+textColor = "#0F1E36"
+primaryColor = "#FF5A5F"
+linkColor = "#0284C7"
