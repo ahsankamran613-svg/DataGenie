@@ -11,7 +11,12 @@ import pandas as pd
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from src.agent_graph import escape_currency_dollars, run_analyst_query
+from src.agent_graph import (
+    SUPPORTED_GROQ_MODELS,
+    escape_currency_dollars,
+    fetch_available_groq_models,
+    run_analyst_query,
+)
 from src.data_cleaning import clean_dataframe, to_snake_case
 from src.db_manager import (
     DatabaseManager,
@@ -30,7 +35,9 @@ from src.eda_engine import (
 from src.stats_analyzer import (
     ChartSpec,
     build_plotly_chart,
+    execute_sandboxed_plotly_code,
     infer_default_chart_spec,
+    is_plotly_code_safe,
     run_statistical_checks,
 )
 
@@ -264,10 +271,13 @@ def test_stats_analyzer_and_plotly_builder() -> None:
     inferred = infer_default_chart_spec(df, question="Show monthly revenue trend")
     assert inferred.chart_type == "line"
 
-    for c_type in ("bar", "line", "area", "pie", "scatter"):
+    box_inferred = infer_default_chart_spec(df, question="Give me a box plot of revenue by month")
+    assert box_inferred.chart_type == "box"
+
+    for c_type in ("bar", "line", "area", "pie", "scatter", "box", "violin", "histogram"):
         spec = ChartSpec(
             chart_type=c_type,  # type: ignore[arg-type]
-            x_col="units_sold" if c_type == "scatter" else "month",
+            x_col="units_sold" if c_type in ("scatter", "histogram") else "month",
             y_col="revenue",
             title=f"Test {c_type}",
         )
@@ -278,6 +288,70 @@ def test_stats_analyzer_and_plotly_builder() -> None:
     bad_spec = ChartSpec(chart_type="bar", x_col="missing_x", y_col="missing_y")
     fallback_fig = build_plotly_chart(df, chart_spec=bad_spec)
     assert fallback_fig is not None
+
+
+def test_plotly_sandbox_security_and_execution() -> None:
+    """Verify Option 2 AST security validation and sandboxed Plotly execution."""
+    df = pd.DataFrame(
+        {
+            "region": ["North", "South", "East", "West"],
+            "revenue": [200.0, 150.0, 180.0, 220.0],
+        }
+    )
+
+    # 1. Safe dynamic box plot code
+    safe_code = """
+import plotly.express as px
+fig = px.box(df, x="region", y="revenue", points="outliers")
+"""
+    is_safe, msg = is_plotly_code_safe(safe_code)
+    assert is_safe
+    fig = execute_sandboxed_plotly_code(safe_code, df)
+    assert fig is not None
+
+    # 2. Block os/subprocess import
+    unsafe_import = "import os; os.system('echo test')"
+    is_safe, msg = is_plotly_code_safe(unsafe_import)
+    assert not is_safe
+    assert "Forbidden import" in msg
+    assert execute_sandboxed_plotly_code(unsafe_import, df) is None
+
+    # 3. Block open() call
+    unsafe_open = "with open('secret.txt', 'w') as f: f.write('bad')"
+    is_safe, msg = is_plotly_code_safe(unsafe_open)
+    assert not is_safe
+    assert "Forbidden identifier" in msg
+    assert execute_sandboxed_plotly_code(unsafe_open, df) is None
+
+    # 4. Block dunder sandbox escapes
+    unsafe_dunder = "subclasses = ().__class__.__subclasses__()"
+    is_safe, msg = is_plotly_code_safe(unsafe_dunder)
+    assert not is_safe
+    assert "Forbidden attribute access" in msg
+    assert execute_sandboxed_plotly_code(unsafe_dunder, df) is None
+
+    # 5. Verify skewed box plot auto-scale un-squishing
+    skewed_df = pd.DataFrame(
+        {
+            "region": ["North", "North", "North", "North", "North"],
+            "revenue": [100.0, 110.0, 120.0, 130.0, 42000.0],
+        }
+    )
+    box_spec = ChartSpec(chart_type="box", x_col="region", y_col="revenue")
+    box_fig = build_plotly_chart(skewed_df, chart_spec=box_spec)
+    assert box_fig is not None
+    assert box_fig.layout.yaxis.type == "log"
+    assert len(box_fig.layout.updatemenus) > 0
+
+    # 6. Verify exactly 3 models available, with gpt-oss-120b as primary
+    assert SUPPORTED_GROQ_MODELS == [
+        "openai/gpt-oss-120b",
+        "qwen/qwen3.8-27b",
+        "openai/gpt-oss-20b",
+    ]
+    models = fetch_available_groq_models(None)
+    assert models[0] == "openai/gpt-oss-120b"
+    assert len(models) == 3
 
 
 def test_langgraph_self_correction_loop() -> None:

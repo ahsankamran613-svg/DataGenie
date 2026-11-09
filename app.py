@@ -392,14 +392,17 @@ def render_trace_expander(result: AnalystResult, key_suffix: str) -> None:
     """Render the collapsed 'Under the hood' transparency panel."""
     retry_note = f" · {result.retry_count} self-correction(s)" if result.retry_count > 0 else ""
     with st.expander(f"Under the hood{retry_note}", icon=":material/code:", expanded=False):
-        sub_sql, sub_data, sub_stats = st.tabs(["SQL", "Result table", "Stats & steps"])
+        tab_titles = ["SQL", "Result table", "Stats & steps"]
+        if getattr(result, "chart_code", None):
+            tab_titles.append("Plotly code")
+        sub_tabs = st.tabs(tab_titles)
 
-        with sub_sql:
+        with sub_tabs[0]:
             if result.sql_explanation:
                 st.caption(result.sql_explanation)
             st.code(result.sql_query or "-- No SQL generated", language="sql")
 
-        with sub_data:
+        with sub_tabs[1]:
             if not result.dataframe.empty:
                 st.dataframe(result.dataframe, width="stretch", hide_index=True)
                 st.download_button(
@@ -413,7 +416,7 @@ def render_trace_expander(result: AnalystResult, key_suffix: str) -> None:
             else:
                 st.caption("No rows returned.")
 
-        with sub_stats:
+        with sub_tabs[2]:
             stats_lines = result.stats_summary.get("summary_lines", [])
             if stats_lines:
                 st.markdown("**Verified Python statistics**")
@@ -427,6 +430,11 @@ def render_trace_expander(result: AnalystResult, key_suffix: str) -> None:
                         "retry": ":material/autorenew:",
                     }.get(step["status"], ":material/error:")
                     st.caption(f"{icon} **{step['node']}** · {step['duration_ms']} ms — {step['detail']}")
+
+        if len(sub_tabs) > 3:
+            with sub_tabs[3]:
+                st.caption("Sandboxed AI-generated Python Plotly code:")
+                st.code(result.chart_code, language="python")
 
 
 def render_analyst_tab(api_key: str, model_name: str) -> None:
@@ -462,7 +470,17 @@ def render_analyst_tab(api_key: str, model_name: str) -> None:
             with st.chat_message("assistant", avatar=":material/query_stats:"):
                 render_answer(msg["result"], key_suffix=f"hist_{idx}")
 
-    chat_prompt = st.chat_input("Ask about revenue, margins, trends, regions…")
+    # Question bar anchored at the bottom with quick actions dot button
+    col_input, col_dot = st.columns([12, 1], vertical_alignment="bottom")
+    with col_input:
+        chat_prompt = st.chat_input("Ask about revenue, margins, trends, regions…")
+    with col_dot:
+        with st.popover("•••", help="Quick options & model info"):
+            st.markdown(f"**Model**: `{model_name}`")
+            if st.button("🧹 Clear chat", width="stretch", key="popover_clear"):
+                st.session_state["messages"] = []
+                st.rerun()
+
     active_question = queued_prompt or chat_prompt
 
     if not active_question:
@@ -475,11 +493,23 @@ def render_analyst_tab(api_key: str, model_name: str) -> None:
         )
         return
 
-    messages.append({"role": "user", "content": active_question})
+    # Render newly asked question
     with st.chat_message("user", avatar=":material/person:"):
         st.markdown(active_question)
 
     with st.chat_message("assistant", avatar=":material/query_stats:"):
+        col_stat, col_stop = st.columns([5, 1], vertical_alignment="center")
+        with col_stop:
+            stop_clicked = st.button("⏹ Stop", key=f"stop_{len(messages)}", type="secondary", help="Stop generation")
+        with col_stat:
+            status_box = st.status("Thinking it through…", expanded=False)
+
+        if stop_clicked:
+            status_box.update(label="Analysis cancelled", state="error", expanded=False)
+            st.toast("Evaluation stopped by user.", icon=":material/stop_circle:")
+            st.rerun()
+            return
+
         step_labels = {
             "sql_writer": "Writing SQL…",
             "sql_critic": "Checking & running the query…",
@@ -487,40 +517,39 @@ def render_analyst_tab(api_key: str, model_name: str) -> None:
             "insight_analyst": "Writing up the findings…",
         }
 
-        with st.status("Thinking it through…", expanded=False) as status_box:
+        def _on_step(node_name: str, node_update: dict[str, Any]) -> None:
+            if node_name == "sql_critic" and node_update.get("sql_error"):
+                attempt = node_update.get("retry_count", 1)
+                status_box.update(label=f"Fixing the query (attempt {attempt}/3)…")
+            else:
+                status_box.update(label=step_labels.get(node_name, "Analyzing…"))
 
-            def _on_step(node_name: str, node_update: dict[str, Any]) -> None:
-                if node_name == "sql_critic" and node_update.get("sql_error"):
-                    attempt = node_update.get("retry_count", 1)
-                    status_box.update(label=f"Fixing the query (attempt {attempt}/3)…")
-                else:
-                    status_box.update(label=step_labels.get(node_name, "Analyzing…"))
-
-            try:
-                result = run_analyst_query(
-                    question=active_question,
-                    db_manager=st.session_state["db_manager"],
-                    api_key=api_key,
-                    model_name=model_name,
-                    on_step_callback=_on_step,
+        try:
+            result = run_analyst_query(
+                question=active_question,
+                db_manager=st.session_state["db_manager"],
+                api_key=api_key,
+                model_name=model_name,
+                on_step_callback=_on_step,
+            )
+            total_ms = sum(int(s.get("duration_ms", 0)) for s in result.trace_steps)
+            status_box.update(label=f"Done in {total_ms / 1000:.1f}s", state="complete", expanded=False)
+        except Exception as exc:
+            status_box.update(label="Analysis failed", state="error", expanded=True)
+            err_msg = str(exc)
+            st.error(f"Could not complete analysis: {err_msg}")
+            if "model_not_found" in err_msg or "does not exist" in err_msg:
+                st.info(
+                    "Switch the **Model** in the sidebar (under **Model & API key**) to "
+                    "`openai/gpt-oss-120b` or `qwen/qwen3.8-27b`.",
+                    icon=":material/lightbulb:",
                 )
-                total_ms = sum(int(s.get("duration_ms", 0)) for s in result.trace_steps)
-                status_box.update(label=f"Done in {total_ms / 1000:.1f}s", state="complete", expanded=False)
-            except Exception as exc:
-                status_box.update(label="Analysis failed", state="error", expanded=True)
-                err_msg = str(exc)
-                st.error(f"Could not complete analysis: {err_msg}")
-                if "model_not_found" in err_msg or "does not exist" in err_msg:
-                    st.info(
-                        "Switch the **Model** in the sidebar (under **Model & API key**) to "
-                        "`openai/gpt-oss-120b` or `openai/gpt-oss-20b`.",
-                        icon=":material/lightbulb:",
-                    )
-                messages.pop()
-                return
+            return
 
         render_answer(result, key_suffix=f"live_{len(messages)}")
+        messages.append({"role": "user", "content": active_question})
         messages.append({"role": "assistant", "result": result})
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------

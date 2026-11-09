@@ -7,6 +7,7 @@ and renders clean, theme-adaptive (light/dark) interactive Plotly charts from a 
 
 from __future__ import annotations
 
+import ast
 from typing import Any, Literal
 import numpy as np
 import pandas as pd
@@ -57,7 +58,19 @@ def _format_data_value(val: float, col_name: str) -> str:
 class ChartSpec(BaseModel):
     """Structured chart specification produced by the Stats & Chart node."""
 
-    chart_type: Literal["bar", "line", "area", "pie", "scatter", "none"] = Field(
+    chart_type: Literal[
+        "bar",
+        "line",
+        "area",
+        "pie",
+        "scatter",
+        "box",
+        "violin",
+        "histogram",
+        "treemap",
+        "funnel",
+        "none",
+    ] = Field(
         default="bar",
         description="Best chart type for the SQL result table ('none' if single scalar value).",
     )
@@ -301,6 +314,226 @@ def run_statistical_checks(df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+ALLOWED_SANDBOX_MODULES = {
+    "plotly",
+    "plotly.express",
+    "px",
+    "plotly.graph_objects",
+    "go",
+    "pandas",
+    "pd",
+    "numpy",
+    "np",
+    "scipy",
+    "statsmodels",
+}
+
+FORBIDDEN_SANDBOX_NAMES = {
+    "open",
+    "eval",
+    "exec",
+    "compile",
+    "__import__",
+    "globals",
+    "locals",
+    "getattr",
+    "setattr",
+    "delattr",
+    "hasattr",
+    "input",
+    "exit",
+    "quit",
+    "breakpoint",
+    "help",
+    "memoryview",
+}
+
+def _safe_sandbox_import(name: str, *args: Any, **kwargs: Any) -> Any:
+    """Restricted import hook allowing only approved data visualization modules."""
+    root_pkg = name.split(".")[0]
+    if root_pkg not in ALLOWED_SANDBOX_MODULES:
+        raise ImportError(f"Import of module '{name}' is forbidden in sandbox.")
+    return __import__(name, *args, **kwargs)
+
+
+SAFE_SANDBOX_BUILTINS = {
+    "abs": abs,
+    "all": all,
+    "any": any,
+    "bool": bool,
+    "chr": chr,
+    "dict": dict,
+    "enumerate": enumerate,
+    "filter": filter,
+    "float": float,
+    "int": int,
+    "len": len,
+    "list": list,
+    "map": map,
+    "max": max,
+    "min": min,
+    "round": round,
+    "set": set,
+    "sorted": sorted,
+    "str": str,
+    "sum": sum,
+    "tuple": tuple,
+    "zip": zip,
+    "range": range,
+    "isinstance": isinstance,
+    "print": lambda *args, **kwargs: None,
+    "__import__": _safe_sandbox_import,
+    "True": True,
+    "False": False,
+    "None": None,
+}
+
+
+def _extract_raw_python_code(code_str: str) -> str:
+    """Strip markdown code fences and extraneous text from LLM response."""
+    cleaned = code_str.strip()
+    if "```python" in cleaned:
+        cleaned = cleaned.split("```python", 1)[1].split("```", 1)[0]
+    elif "```" in cleaned:
+        cleaned = cleaned.split("```", 1)[1].split("```", 1)[0]
+    return cleaned.strip()
+
+
+def is_plotly_code_safe(code_str: str) -> tuple[bool, str]:
+    """Inspect AST statically to ensure LLM-generated code cannot escape sandbox or access OS."""
+    raw_code = _extract_raw_python_code(code_str)
+    if not raw_code:
+        return False, "Empty code snippet."
+    try:
+        tree = ast.parse(raw_code)
+    except SyntaxError as exc:
+        return False, f"SyntaxError in generated code: {exc}"
+
+    for node in ast.walk(tree):
+        # 1. Imports check: only approved data/chart packages allowed
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root_pkg = alias.name.split(".")[0]
+                if root_pkg not in ALLOWED_SANDBOX_MODULES:
+                    return False, f"Forbidden import: {alias.name}"
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                root_pkg = node.module.split(".")[0]
+                if root_pkg not in ALLOWED_SANDBOX_MODULES:
+                    return False, f"Forbidden import from: {node.module}"
+
+        # 2. Block system / meta / eval calls
+        elif isinstance(node, ast.Name):
+            if node.id in FORBIDDEN_SANDBOX_NAMES:
+                return False, f"Forbidden identifier: {node.id}"
+
+        # 3. Block private / dunder attribute access to prevent sandbox escapes
+        elif isinstance(node, ast.Attribute):
+            if node.attr.startswith("__"):
+                return False, f"Forbidden attribute access: {node.attr}"
+
+    return True, "Safe"
+
+
+def execute_sandboxed_plotly_code(
+    code_str: str,
+    df: pd.DataFrame,
+    default_title: str = "",
+) -> go.Figure | None:
+    """Safely executes validated AI code in a sandboxed namespace and returns a Plotly Figure."""
+    if df is None or df.empty or not code_str:
+        return None
+
+    raw_code = _extract_raw_python_code(code_str)
+    is_safe, _ = is_plotly_code_safe(raw_code)
+    if not is_safe:
+        return None
+
+    safe_globals = {
+        "__builtins__": SAFE_SANDBOX_BUILTINS,
+        "df": df.copy(),
+        "px": px,
+        "go": go,
+        "pd": pd,
+        "np": np,
+        "CHART_PALETTE": CHART_PALETTE,
+        "COLOR_PRIMARY": COLOR_PRIMARY,
+        "COLOR_SECONDARY": COLOR_SECONDARY,
+        "apply_neutral_layout": apply_neutral_layout,
+        "_human_label": _human_label,
+        "_format_data_value": _format_data_value,
+    }
+    local_vars: dict[str, Any] = {}
+
+    try:
+        exec(raw_code, safe_globals, local_vars)
+    except Exception:
+        return None
+
+    candidate_fig = local_vars.get("fig") or safe_globals.get("fig")
+    if not isinstance(candidate_fig, go.Figure):
+        for v in list(local_vars.values()) + list(safe_globals.values()):
+            if isinstance(v, go.Figure):
+                candidate_fig = v
+                break
+
+    if not isinstance(candidate_fig, go.Figure):
+        return None
+
+    # For box plots: auto-correct scale compression if heavily skewed
+    try:
+        is_box = any(getattr(trace, "type", "") == "box" for trace in getattr(candidate_fig, "data", []))
+        if is_box:
+            all_y: list[float] = []
+            for tr in candidate_fig.data:
+                y_arr = getattr(tr, "y", None)
+                if y_arr is not None:
+                    all_y.extend([float(v) for v in y_arr if pd.notna(v)])
+            if len(all_y) >= 4:
+                s_y = pd.Series(all_y)
+                q75 = float(s_y.quantile(0.75))
+                max_v = float(s_y.max())
+                min_v = float(s_y.min())
+                if q75 > 0 and max_v >= 5 * q75 and min_v > 0:
+                    current_y_type = getattr(getattr(candidate_fig.layout, "yaxis", None), "type", "linear")
+                    if current_y_type != "log":
+                        candidate_fig.update_yaxes(type="log")
+                    if not candidate_fig.layout.updatemenus:
+                        candidate_fig.update_layout(
+                            updatemenus=[
+                                dict(
+                                    type="buttons",
+                                    direction="right",
+                                    x=1.0,
+                                    y=1.14,
+                                    xanchor="right",
+                                    yanchor="top",
+                                    bgcolor="rgba(255, 255, 255, 0.08)",
+                                    bordercolor="rgba(148, 163, 184, 0.25)",
+                                    font=dict(size=11),
+                                    buttons=[
+                                        dict(label="Log Scale (Un-squished)", method="relayout", args=[{"yaxis.type": "log"}]),
+                                        dict(label="Linear Scale", method="relayout", args=[{"yaxis.type": "linear"}]),
+                                    ],
+                                )
+                            ]
+                        )
+    except Exception:
+        pass
+
+    try:
+        paper_bg = getattr(candidate_fig.layout, "paper_bgcolor", None)
+        if not paper_bg or paper_bg != "rgba(0,0,0,0)":
+            title_text = ""
+            if candidate_fig.layout.title and candidate_fig.layout.title.text:
+                title_text = candidate_fig.layout.title.text
+            apply_neutral_layout(candidate_fig, title=title_text or default_title)
+    except Exception:
+        pass
+
+    return candidate_fig
+
+
 def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
     """Deterministic fallback ChartSpec builder when LLM output is omitted or mismatched."""
     if df is None or len(df) < 2:
@@ -318,6 +551,44 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
             break
 
     q_lower = question.lower()
+
+    if "box" in q_lower or "boxplot" in q_lower:
+        x_col = dimension_cols[0] if dimension_cols else ""
+        return ChartSpec(
+            chart_type="box",
+            x_col=x_col,
+            y_col=y_col,
+            color_col=dimension_cols[1] if len(dimension_cols) >= 2 else None,
+            title=f"{_human_label(y_col)} Distribution" + (f" by {_human_label(x_col)}" if x_col else ""),
+        )
+
+    if "violin" in q_lower:
+        x_col = dimension_cols[0] if dimension_cols else ""
+        return ChartSpec(
+            chart_type="violin",
+            x_col=x_col,
+            y_col=y_col,
+            color_col=dimension_cols[1] if len(dimension_cols) >= 2 else None,
+            title=f"{_human_label(y_col)} Violin Distribution" + (f" by {_human_label(x_col)}" if x_col else ""),
+        )
+
+    if "histogram" in q_lower:
+        return ChartSpec(
+            chart_type="histogram",
+            x_col=y_col,
+            y_col=y_col,
+            title=f"{_human_label(y_col)} Frequency Distribution",
+        )
+
+    if "treemap" in q_lower:
+        x_col = dimension_cols[0] if dimension_cols else ""
+        return ChartSpec(
+            chart_type="treemap",
+            x_col=x_col,
+            y_col=y_col,
+            color_col=dimension_cols[1] if len(dimension_cols) >= 2 else None,
+            title=f"{_human_label(y_col)} Treemap" + (f" by {_human_label(x_col)}" if x_col else ""),
+        )
 
     if time_col is not None:
         other_dims = [c for c in dimension_cols if c != time_col]
@@ -399,10 +670,21 @@ def build_plotly_chart(
 
     # Validate columns against actual DataFrame; fallback seamlessly if mismatched
     cols = set(df.columns)
-    if spec.x_col not in cols or spec.y_col not in cols or not pd.api.types.is_numeric_dtype(df[spec.y_col]):
-        spec = infer_default_chart_spec(df, question=question)
-        if spec.chart_type == "none" or spec.x_col not in cols or spec.y_col not in cols:
-            return None
+    if spec.chart_type in ("box", "violin"):
+        if spec.y_col not in cols or not pd.api.types.is_numeric_dtype(df[spec.y_col]):
+            spec = infer_default_chart_spec(df, question=question)
+            if spec.chart_type == "none" or spec.y_col not in cols:
+                return None
+    elif spec.chart_type == "histogram":
+        if spec.x_col not in cols or not pd.api.types.is_numeric_dtype(df[spec.x_col]):
+            spec = infer_default_chart_spec(df, question=question)
+            if spec.chart_type == "none" or spec.x_col not in cols:
+                return None
+    else:
+        if spec.x_col not in cols or spec.y_col not in cols or not pd.api.types.is_numeric_dtype(df[spec.y_col]):
+            spec = infer_default_chart_spec(df, question=question)
+            if spec.chart_type == "none" or spec.x_col not in cols or spec.y_col not in cols:
+                return None
 
     color_col = spec.color_col if (spec.color_col and spec.color_col in cols and spec.color_col != spec.x_col) else None
 
@@ -539,6 +821,92 @@ def build_plotly_chart(
             fig.update_traces(
                 marker={"size": 10, "opacity": 0.88, "line": {"width": 1.5, "color": "#FFFFFF"}},
                 hovertemplate=f"<b>%{{x:,.2f}}</b> × <b>{y_prefix}%{{y:,.2f}}{y_suffix}</b><extra></extra>",
+            )
+
+        elif spec.chart_type == "box":
+            box_x = spec.x_col if (spec.x_col and spec.x_col in cols) else None
+            s_val = pd.to_numeric(plot_df[spec.y_col], errors="coerce").dropna()
+            q75 = float(s_val.quantile(0.75)) if len(s_val) >= 4 else 0.0
+            max_val = float(s_val.max()) if not s_val.empty else 0.0
+            min_val = float(s_val.min()) if not s_val.empty else 0.0
+            is_heavily_skewed = (q75 > 0 and max_val >= 5 * q75 and min_val > 0)
+
+            fig = px.box(
+                plot_df,
+                x=box_x,
+                y=spec.y_col,
+                color=color_col or box_x,
+                points="outliers",
+                log_y=is_heavily_skewed,
+                labels=labels,
+                color_discrete_sequence=CHART_PALETTE,
+            )
+            fig.update_traces(
+                marker=dict(size=5, opacity=0.8),
+                hovertemplate=f"<b>%{{x}}</b><br>{_human_label(spec.y_col)}: <b>{y_prefix}%{{y:,.2f}}{y_suffix}</b><extra></extra>",
+            )
+            if is_heavily_skewed:
+                fig.update_layout(
+                    updatemenus=[
+                        dict(
+                            type="buttons",
+                            direction="right",
+                            x=1.0,
+                            y=1.14,
+                            xanchor="right",
+                            yanchor="top",
+                            bgcolor="rgba(255, 255, 255, 0.08)",
+                            bordercolor="rgba(148, 163, 184, 0.25)",
+                            font=dict(size=11),
+                            buttons=[
+                                dict(label="Log Scale (Un-squished)", method="relayout", args=[{"yaxis.type": "log"}]),
+                                dict(label="Linear Scale", method="relayout", args=[{"yaxis.type": "linear"}]),
+                            ],
+                        )
+                    ]
+                )
+
+        elif spec.chart_type == "violin":
+            violin_x = spec.x_col if (spec.x_col and spec.x_col in cols) else None
+            fig = px.violin(
+                plot_df,
+                x=violin_x,
+                y=spec.y_col,
+                color=color_col or violin_x,
+                box=True,
+                points="outliers",
+                labels=labels,
+                color_discrete_sequence=CHART_PALETTE,
+            )
+
+        elif spec.chart_type == "histogram":
+            fig = px.histogram(
+                plot_df,
+                x=spec.x_col,
+                color=color_col,
+                labels=labels,
+                color_discrete_sequence=CHART_PALETTE,
+            )
+
+        elif spec.chart_type == "treemap":
+            path_cols = [c for c in [color_col, spec.x_col] if c and c in plot_df.columns]
+            if not path_cols:
+                path_cols = [spec.x_col]
+            fig = px.treemap(
+                plot_df,
+                path=path_cols,
+                values=spec.y_col,
+                color_discrete_sequence=CHART_PALETTE,
+            )
+
+        elif spec.chart_type == "funnel":
+            fig = px.funnel(
+                plot_df,
+                x=spec.y_col,
+                y=spec.x_col,
+                color=color_col,
+                labels=labels,
+                color_discrete_sequence=CHART_PALETTE,
             )
         else:
             return None

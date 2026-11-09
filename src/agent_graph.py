@@ -25,26 +25,27 @@ from src.db_manager import DatabaseManager, validate_readonly_sql
 from src.stats_analyzer import (
     ChartSpec,
     build_plotly_chart,
+    execute_sandboxed_plotly_code,
     infer_default_chart_spec,
+    is_plotly_code_safe,
     run_statistical_checks,
 )
 
 
 SUPPORTED_GROQ_MODELS: list[str] = [
     "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b",
     "qwen/qwen3.8-27b",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
-    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-20b",
 ]
 
 MAX_SQL_RETRIES = 3
 
 
 def fetch_available_groq_models(api_key: str | None = None) -> list[str]:
-    """Fetch live chat/text models available to this Groq API key, falling back to SUPPORTED_GROQ_MODELS."""
+    """Fetch live chat/text models available to this Groq API key, strictly restricted to the 3 permitted models."""
+    permitted = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
     if not api_key or not api_key.strip():
-        return list(SUPPORTED_GROQ_MODELS)
+        return list(permitted)
     try:
         import urllib.request
 
@@ -57,20 +58,13 @@ def fetch_available_groq_models(api_key: str | None = None) -> list[str]:
         )
         with urllib.request.urlopen(req, timeout=3.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-            raw_ids = [m["id"] for m in data.get("data", []) if "id" in m]
-            excluded_terms = ("whisper", "guard", "orpheus", "safeguard")
-            valid_models = [
-                m_id for m_id in raw_ids
-                if not any(term in m_id.lower() for term in excluded_terms)
-            ]
-            if valid_models:
-                priority = ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
-                ordered = [m for m in priority if m in valid_models]
-                others = [m for m in sorted(valid_models) if m not in ordered]
-                return ordered + others
+            raw_ids = set(m["id"] for m in data.get("data", []) if "id" in m)
+            valid = [m for m in permitted if m in raw_ids]
+            if valid:
+                return valid
     except Exception:
         pass
-    return list(SUPPORTED_GROQ_MODELS)
+    return list(permitted)
 
 
 class SQLDraft(BaseModel):
@@ -82,6 +76,22 @@ class SQLDraft(BaseModel):
     explanation: str = Field(
         default="",
         description="Brief 1-sentence explanation of how this query answers the business question.",
+    )
+
+
+class ChartDraft(BaseModel):
+    """Structured output schema for AI-generated Plotly visualization code."""
+
+    explanation: str = Field(
+        default="",
+        description="Short 1-sentence rationale for the visualization design.",
+    )
+    chart_type: str = Field(
+        default="custom",
+        description="Type of chart (e.g. box, bar, line, histogram, treemap, scatter).",
+    )
+    python_code: str = Field(
+        description="Self-contained Python code that creates the Plotly figure and assigns to variable `fig`.",
     )
 
 
@@ -99,6 +109,7 @@ class AgentState(TypedDict):
     result_columns: list[str]
     stats_summary: dict[str, Any]
     chart_spec: dict[str, Any] | None
+    chart_code: str | None
     executive_summary: str
     trace_steps: list[dict[str, Any]]
 
@@ -118,6 +129,7 @@ class AnalystResult:
     retry_count: int
     trace_steps: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
+    chart_code: str | None = None
 
 
 def escape_currency_dollars(markdown_text: str) -> str:
@@ -204,7 +216,9 @@ CRITICAL SQL RULES:
 3. RELATIVE TIME ANCHORING: Always check the `[date range: ...]` in the schema context above! When the user asks about "last month", "this month", or "prior month", anchor relative to the LATEST month present in the dataset (for example, if max date is '2026-10-31', "last month" = '2026-10' and the comparison prior month = '2026-09'). Never use `CURRENT_DATE` if it falls outside the dataset's date range.
 4. DIAGNOSTIC ("WHY") QUESTIONS: When the user asks *why* a metric changed (e.g., "Why did revenue drop in the North region last month?"), compare the relevant periods (e.g., prior month vs latest month) grouped by key breakdown dimensions (like `product_category`) and include operational metrics (`SUM(revenue)`, `SUM(units_sold)`, `ROUND(AVG(shipping_delay_days), 2)`, `ROUND(AVG(discount_pct), 2)`) so the root cause is clear!
 5. PROFIT MARGIN QUESTIONS: Compute profit margin accurately as `ROUND(SUM(profit) * 100.0 / NULLIF(SUM(revenue), 0), 2) AS profit_margin_pct` alongside `ROUND(SUM(revenue), 2) AS total_revenue` and `ROUND(SUM(profit), 2) AS total_profit`.
-6. Keep results aggregated and concise (at most 60 rows) so charts and executive summaries are crystal clear."""
+6. AGGREGATED VS DISTRIBUTION QUERIES:
+   - For categorical comparisons, rankings, or trends (e.g., total sales by region, monthly revenue): keep results aggregated with GROUP BY and concise (at most 60 rows).
+   - For distribution, spread, box plot, or histogram queries (e.g., "box plot of revenue by region", "distribution of order values", "spread of profit margins"): do NOT aggregate with SUM/AVG! Instead, SELECT raw unaggregated row-level samples (e.g. `SELECT region, revenue FROM sales_data WHERE revenue IS NOT NULL LIMIT 400`) so the statistical distribution, median, IQR, and outliers can be plotted accurately!"""
 
         user_prompt = f"Business Question: {state['question']}"
         if prev_error:
@@ -331,7 +345,7 @@ CRITICAL SQL RULES:
         return "stats_and_chart"
 
     # ------------------------------------------------------------------
-    # Node 3: Deterministic Python Stats & Plotly Chart Spec Builder
+    # Node 3: Deterministic Python Stats & Plotly Chart Generator (Sandbox Option 2)
     # ------------------------------------------------------------------
     def stats_and_chart_node(state: AgentState) -> dict[str, Any]:
         t0 = time.perf_counter()
@@ -342,42 +356,73 @@ CRITICAL SQL RULES:
         stats_info = run_statistical_checks(df)
         default_spec = infer_default_chart_spec(df, question=state["question"])
         chosen_spec = default_spec
+        verified_chart_code: str | None = None
+        detail_msg = f"Computed Python stats & configured `{default_spec.chart_type}` chart."
 
         if len(df) >= 2 and default_spec.chart_type != "none":
             col_dtypes = {c: str(df[c].dtype) for c in df.columns}
             sample_preview = df.head(6).to_string(index=False)
-            chart_prompt = f"""Choose the clearest Plotly chart configuration to visualize this SQL result for a business user.
+            chart_prompt = f"""You are an expert Data Visualization Engineer writing Python Plotly code for a business user.
 
 User Question: {state['question']}
 Available Columns & Dtypes (MUST match exact column names): {json.dumps(col_dtypes)}
 Sample Rows:
 {sample_preview}
 
-Rules:
-- Choose `bar` for category comparisons or 2-period grouped comparisons (`color_col` = period/month).
-- Choose `line` or `area` for multi-period trends over time (`>= 3` time points).
-- Choose `pie` ONLY for simple part-to-whole shares (`<= 6` categories, no negative numbers, no `color_col`).
-- `x_col`, `y_col`, and optional `color_col` MUST be exact keys from Available Columns & Dtypes."""
-            try:
-                chart_llm = llm.with_structured_output(ChartSpec)
-                spec_res = chart_llm.invoke([HumanMessage(content=chart_prompt)])
-                if isinstance(spec_res, ChartSpec):
-                    chosen_spec = spec_res
-                elif isinstance(spec_res, dict):
-                    chosen_spec = ChartSpec(**spec_res)
-            except Exception:
-                chosen_spec = default_spec
+Write Python code that creates an interactive, high-contrast Plotly figure and assigns it to variable `fig`.
 
-            # Ensure columns exist on df; otherwise keep deterministic fallback
-            if chosen_spec.x_col not in df.columns or chosen_spec.y_col not in df.columns:
-                chosen_spec = default_spec
+CRITICAL CODING RULES:
+1. The DataFrame is ALREADY provided in variable `df`. Do NOT redefine, mock, or read `df`.
+2. ONLY use `px` (plotly.express), `go` (plotly.graph_objects), `pd` (pandas), or `np` (numpy).
+3. If the user asked for a box plot, use `fig = px.box(df, x=..., y=..., points='outliers')`. If values are heavily right-skewed (max is > 5x the median or 75th percentile), set `log_y=True` so the box plot is readable rather than flattened into a thin line!
+4. If the user asked for a histogram, use `fig = px.histogram(df, x=...)`.
+5. If the user asked for a violin plot, use `fig = px.violin(df, x=..., y=..., box=True, points='outliers')`.
+6. For multi-period trends over time, use `fig = px.line(df, x=..., y=...)` or `fig = px.area(df, x=..., y=...)`.
+7. For categorical comparisons, use `fig = px.bar(df, x=..., y=...)`.
+8. Always assign the final Plotly Figure to variable `fig`.
+9. Use brand colors: `color_discrete_sequence=['#FF6B6B', '#38BDF8', '#34D399', '#FBBF24', '#A78BFA', '#F472B6']`.
+10. All column names MUST strictly match the Available Columns & Dtypes above."""
+
+            raw_code = ""
+            chart_kind = default_spec.chart_type
+            try:
+                chart_llm = llm.with_structured_output(ChartDraft)
+                draft_res = chart_llm.invoke([HumanMessage(content=chart_prompt)])
+                if isinstance(draft_res, ChartDraft):
+                    raw_code = draft_res.python_code
+                    chart_kind = draft_res.chart_type
+                elif isinstance(draft_res, dict):
+                    raw_code = str(draft_res.get("python_code", ""))
+                    chart_kind = str(draft_res.get("chart_type", default_spec.chart_type))
+                else:
+                    raw_resp = llm.invoke([HumanMessage(content=chart_prompt)])
+                    raw_code = str(raw_resp.content)
+                    chart_kind = default_spec.chart_type
+            except Exception:
+                try:
+                    raw_resp = llm.invoke([HumanMessage(content=chart_prompt)])
+                    raw_code = str(raw_resp.content)
+                    chart_kind = default_spec.chart_type
+                except Exception:
+                    raw_code = ""
+
+            # Sandbox validation & execution test
+            if raw_code:
+                tested_fig = execute_sandboxed_plotly_code(raw_code, df, default_title=state["question"])
+                if tested_fig is not None:
+                    verified_chart_code = raw_code
+                    detail_msg = f"Generated & verified secure Plotly code (`{chart_kind}`)."
+                else:
+                    detail_msg = f"Rendered `{default_spec.chart_type}` chart (sandbox fallback)."
+            else:
+                detail_msg = f"Configured `{default_spec.chart_type}` chart."
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         trace = list(state.get("trace_steps", [])) + [
             {
                 "node": "Stats & Chart",
                 "status": "done",
-                "detail": f"Computed Python stats & configured `{chosen_spec.chart_type}` chart.",
+                "detail": detail_msg,
                 "duration_ms": elapsed_ms,
             }
         ]
@@ -385,6 +430,7 @@ Rules:
         return {
             "stats_summary": stats_info,
             "chart_spec": chosen_spec.model_dump(),
+            "chart_code": verified_chart_code,
             "trace_steps": trace,
         }
 
@@ -516,6 +562,7 @@ def run_analyst_query(
         "result_columns": [],
         "stats_summary": {},
         "chart_spec": None,
+        "chart_code": None,
         "executive_summary": "",
         "trace_steps": [],
     }
@@ -533,12 +580,14 @@ def run_analyst_query(
     records = final_state.get("result_records", [])
     result_df = pd.DataFrame(records, columns=cols) if cols else pd.DataFrame()
     chart_spec_dict = final_state.get("chart_spec")
+    chart_code_str = final_state.get("chart_code")
 
-    fig = (
-        build_plotly_chart(result_df, chart_spec=chart_spec_dict, question=question)
-        if not result_df.empty and not final_state.get("sql_error")
-        else None
-    )
+    fig: go.Figure | None = None
+    if not result_df.empty and not final_state.get("sql_error"):
+        if chart_code_str:
+            fig = execute_sandboxed_plotly_code(chart_code_str, result_df, default_title=question)
+        if fig is None:
+            fig = build_plotly_chart(result_df, chart_spec=chart_spec_dict, question=question)
 
     return AnalystResult(
         question=question,
@@ -552,4 +601,5 @@ def run_analyst_query(
         retry_count=int(final_state.get("retry_count", 0)),
         trace_steps=final_state.get("trace_steps", []),
         error=final_state.get("sql_error"),
+        chart_code=chart_code_str,
     )
