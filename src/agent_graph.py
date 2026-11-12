@@ -218,7 +218,7 @@ CRITICAL SQL RULES:
 5. PROFIT MARGIN QUESTIONS: Compute profit margin accurately as `ROUND(SUM(profit) * 100.0 / NULLIF(SUM(revenue), 0), 2) AS profit_margin_pct` alongside `ROUND(SUM(revenue), 2) AS total_revenue` and `ROUND(SUM(profit), 2) AS total_profit`.
 6. AGGREGATED VS DISTRIBUTION QUERIES:
    - For categorical comparisons, rankings, or trends (e.g., total sales by region, monthly revenue): keep results aggregated with GROUP BY and concise (at most 60 rows).
-   - For distribution, spread, box plot, or histogram queries (e.g., "box plot of revenue by region", "distribution of order values", "spread of profit margins"): do NOT aggregate with SUM/AVG! Instead, SELECT raw unaggregated row-level samples (e.g. `SELECT region, revenue FROM sales_data WHERE revenue IS NOT NULL LIMIT 400`) so the statistical distribution, median, IQR, and outliers can be plotted accurately!"""
+   - For distribution, spread, box plot, violin plot, or histogram queries (e.g., "box plot of revenue by region", "violin plot of shipping delay days across product categories", "distribution of order values", "spread of profit margins"): do NOT aggregate with SUM/AVG! Instead, SELECT raw unaggregated row-level samples (e.g. `SELECT region, revenue FROM sales_data WHERE revenue IS NOT NULL LIMIT 400`) so the statistical distribution, median, IQR, and outliers can be plotted accurately!"""
 
         user_prompt = f"Business Question: {state['question']}"
         if prev_error:
@@ -359,7 +359,7 @@ CRITICAL SQL RULES:
         verified_chart_code: str | None = None
         detail_msg = f"Computed Python stats & configured `{default_spec.chart_type}` chart."
 
-        if len(df) >= 2 and default_spec.chart_type != "none":
+        if len(df) >= 2 and (default_spec.chart_type != "none" or len(df.columns) >= 2):
             col_dtypes = {c: str(df[c].dtype) for c in df.columns}
             sample_preview = df.head(6).to_string(index=False)
             chart_prompt = f"""You are an expert Data Visualization Engineer writing Python Plotly code for a business user.
@@ -377,11 +377,12 @@ CRITICAL CODING RULES:
 3. If the user asked for a box plot, use `fig = px.box(df, x=..., y=..., points='outliers')`. If values are heavily right-skewed (max is > 5x the median or 75th percentile), set `log_y=True` so the box plot is readable rather than flattened into a thin line!
 4. If the user asked for a histogram, use `fig = px.histogram(df, x=...)`.
 5. If the user asked for a violin plot, use `fig = px.violin(df, x=..., y=..., box=True, points='outliers')`.
-6. For multi-period trends over time, use `fig = px.line(df, x=..., y=...)` or `fig = px.area(df, x=..., y=...)`.
-7. For categorical comparisons, use `fig = px.bar(df, x=..., y=...)`.
-8. Always assign the final Plotly Figure to variable `fig`.
-9. Use brand colors: `color_discrete_sequence=['#FF6B6B', '#38BDF8', '#34D399', '#FBBF24', '#A78BFA', '#F472B6']`.
-10. All column names MUST strictly match the Available Columns & Dtypes above."""
+6. If the user asked for a 2D heatmap, pivot `df` (`pivoted = df.pivot_table(index=y_col, columns=x_col, values=val_col, aggfunc='mean')`) and use `fig = px.imshow(pivoted, text_auto='.2f', aspect='auto', color_continuous_scale='YlOrRd')` or `px.density_heatmap(df, x=..., y=..., z=..., histfunc='avg', text_auto=True)`.
+7. For multi-period trends over time, use `fig = px.line(df, x=..., y=...)` or `fig = px.area(df, x=..., y=...)`.
+8. For categorical comparisons, use `fig = px.bar(df, x=..., y=...)`.
+9. Always assign the final Plotly Figure to variable `fig`.
+10. Use brand colors: `color_discrete_sequence=['#FF6B6B', '#38BDF8', '#34D399', '#FBBF24', '#A78BFA', '#F472B6']`.
+11. All column names MUST strictly match the Available Columns & Dtypes above."""
 
             raw_code = ""
             chart_kind = default_spec.chart_type

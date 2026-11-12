@@ -8,6 +8,7 @@ and renders clean, theme-adaptive (light/dark) interactive Plotly charts from a 
 from __future__ import annotations
 
 import ast
+import re
 from typing import Any, Literal
 import numpy as np
 import pandas as pd
@@ -30,6 +31,44 @@ COLOR_PRIMARY = "#FF6B6B"
 COLOR_SECONDARY = "#38BDF8"
 COLOR_GRID = "rgba(148, 163, 184, 0.18)"
 COLOR_MUTED = "#94A3B8"
+
+# Column-classification and visualization configuration constants
+TIME_DIMENSION_WORDS: frozenset[str] = frozenset(
+    {"date", "month", "year", "week", "quarter", "period", "yr", "qtr", "fiscal"}
+)
+DURATION_METRIC_WORDS: frozenset[str] = frozenset(
+    {
+        "delay",
+        "delays",
+        "duration",
+        "tenure",
+        "age",
+        "lead",
+        "latency",
+        "days",
+        "months",
+        "years",
+        "weeks",
+        "hours",
+        "minutes",
+        "seconds",
+        "warranty",
+        "experience",
+        "grace",
+        "trial",
+        "elapsed",
+        "wait",
+        "cycle",
+        "turnaround",
+        "processing",
+        "delivery",
+        "shipping",
+        "payback",
+        "stay",
+    }
+)
+MAX_NUMERIC_TIME_CARDINALITY = 60
+HEATMAP_COLOR_SCALE = "YlOrRd"
 
 
 def _format_data_value(val: float, col_name: str) -> str:
@@ -68,6 +107,7 @@ class ChartSpec(BaseModel):
         "violin",
         "histogram",
         "treemap",
+        "heatmap",
         "funnel",
         "none",
     ] = Field(
@@ -101,26 +141,38 @@ def _human_label(col_name: str) -> str:
     return str(col_name).replace("_", " ").strip().title()
 
 
+def _is_calendar_time_name(col_name: str) -> bool:
+    """Return True if a column name refers to a calendar bucket rather than a duration metric."""
+    words = {w for w in re.split(r"[^a-z0-9]+", str(col_name).lower()) if w}
+    if not words or (words & DURATION_METRIC_WORDS):
+        return False
+    return bool(words & TIME_DIMENSION_WORDS)
+
+
 def _identify_columns(df: pd.DataFrame) -> tuple[list[str], list[str], str | None]:
     """Classify DataFrame columns into `(numeric_cols, dimension_cols, time_col)`."""
     numeric_cols: list[str] = []
     dimension_cols: list[str] = []
     time_col: str | None = None
 
-    time_tokens = ("date", "month", "year", "week", "quarter", "period", "day")
-
     for col in df.columns:
         s = df[col]
-        col_lower = str(col).lower()
-        is_time_named = any(tok in col_lower for tok in time_tokens)
+        is_time_named = _is_calendar_time_name(str(col))
 
         if pd.api.types.is_datetime64_any_dtype(s):
             dimension_cols.append(col)
             if time_col is None:
                 time_col = col
         elif pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
-            # Treat integer year/month columns as time dimensions if named like time
-            if is_time_named and s.nunique(dropna=True) <= 60 and len(df) > 1:
+            # Only treat integer calendar columns (e.g. year=2026, month=1..12) as time dimensions;
+            # float columns and duration/delay/count metrics must remain numeric measures.
+            is_integer_calendar = (
+                pd.api.types.is_integer_dtype(s)
+                and is_time_named
+                and s.nunique(dropna=True) <= MAX_NUMERIC_TIME_CARDINALITY
+                and len(df) > 1
+            )
+            if is_integer_calendar:
                 dimension_cols.append(col)
                 if time_col is None:
                     time_col = col
@@ -552,6 +604,16 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
 
     q_lower = question.lower()
 
+    if "violin" in q_lower:
+        x_col = dimension_cols[0] if dimension_cols else ""
+        return ChartSpec(
+            chart_type="violin",
+            x_col=x_col,
+            y_col=y_col,
+            color_col=dimension_cols[1] if len(dimension_cols) >= 2 else None,
+            title=f"{_human_label(y_col)} Violin Distribution" + (f" by {_human_label(x_col)}" if x_col else ""),
+        )
+
     if "box" in q_lower or "boxplot" in q_lower:
         x_col = dimension_cols[0] if dimension_cols else ""
         return ChartSpec(
@@ -562,15 +624,15 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
             title=f"{_human_label(y_col)} Distribution" + (f" by {_human_label(x_col)}" if x_col else ""),
         )
 
-    if "violin" in q_lower:
-        x_col = dimension_cols[0] if dimension_cols else ""
-        return ChartSpec(
-            chart_type="violin",
-            x_col=x_col,
-            y_col=y_col,
-            color_col=dimension_cols[1] if len(dimension_cols) >= 2 else None,
-            title=f"{_human_label(y_col)} Violin Distribution" + (f" by {_human_label(x_col)}" if x_col else ""),
-        )
+    if "heatmap" in q_lower or "heat map" in q_lower:
+        if len(dimension_cols) >= 2:
+            return ChartSpec(
+                chart_type="heatmap",
+                x_col=dimension_cols[0],
+                y_col=y_col,
+                color_col=dimension_cols[1],
+                title=f"{_human_label(y_col)} Heatmap ({_human_label(dimension_cols[0])} × {_human_label(dimension_cols[1])})",
+            )
 
     if "histogram" in q_lower:
         return ChartSpec(
@@ -645,6 +707,33 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
     return ChartSpec(chart_type="none", title="Summary Result")
 
 
+def _resolve_heatmap_columns(df: pd.DataFrame, spec: ChartSpec) -> tuple[str, str, str] | None:
+    """Resolve `(x_col, y_col, value_col)` for a 2D heatmap from a ChartSpec or DataFrame."""
+    cols = set(df.columns)
+    numeric_cols, dimension_cols, _ = _identify_columns(df)
+    if not numeric_cols:
+        return None
+
+    # Honor explicit spec columns if they supply two dimensions and one numeric value column
+    if (
+        spec.x_col in cols
+        and spec.y_col in cols
+        and spec.color_col in cols
+        and spec.x_col != spec.y_col
+        and spec.color_col not in (spec.x_col, spec.y_col)
+    ):
+        if pd.api.types.is_numeric_dtype(df[spec.y_col]) and not pd.api.types.is_numeric_dtype(df[spec.x_col]):
+            return spec.x_col, spec.color_col, spec.y_col
+        if pd.api.types.is_numeric_dtype(df[spec.color_col]) and not pd.api.types.is_numeric_dtype(df[spec.y_col]):
+            return spec.x_col, spec.y_col, spec.color_col
+
+    if len(dimension_cols) >= 2:
+        val_col = spec.y_col if (spec.y_col in cols and pd.api.types.is_numeric_dtype(df[spec.y_col])) else numeric_cols[0]
+        return dimension_cols[0], dimension_cols[1], val_col
+
+    return None
+
+
 def build_plotly_chart(
     df: pd.DataFrame,
     chart_spec: ChartSpec | dict[str, Any] | None = None,
@@ -670,6 +759,13 @@ def build_plotly_chart(
 
     # Validate columns against actual DataFrame; fallback seamlessly if mismatched
     cols = set(df.columns)
+    heat_cols: tuple[str, str, str] | None = None
+    if spec.chart_type == "heatmap":
+        heat_cols = _resolve_heatmap_columns(df, spec)
+        if heat_cols is None:
+            spec = infer_default_chart_spec(df, question=question)
+            if spec.chart_type == "none" or spec.chart_type == "heatmap":
+                return None
     if spec.chart_type in ("box", "violin"):
         if spec.y_col not in cols or not pd.api.types.is_numeric_dtype(df[spec.y_col]):
             spec = infer_default_chart_spec(df, question=question)
@@ -680,7 +776,7 @@ def build_plotly_chart(
             spec = infer_default_chart_spec(df, question=question)
             if spec.chart_type == "none" or spec.x_col not in cols:
                 return None
-    else:
+    elif spec.chart_type != "heatmap":
         if spec.x_col not in cols or spec.y_col not in cols or not pd.api.types.is_numeric_dtype(df[spec.y_col]):
             spec = infer_default_chart_spec(df, question=question)
             if spec.chart_type == "none" or spec.x_col not in cols or spec.y_col not in cols:
@@ -897,6 +993,28 @@ def build_plotly_chart(
                 path=path_cols,
                 values=spec.y_col,
                 color_discrete_sequence=CHART_PALETTE,
+            )
+
+        elif spec.chart_type == "heatmap" and heat_cols is not None:
+            heat_x, heat_y, heat_z = heat_cols
+            pivot_df = plot_df.pivot_table(
+                index=heat_y,
+                columns=heat_x,
+                values=heat_z,
+                aggfunc="mean",
+            )
+            if pivot_df.empty:
+                return None
+            fig = px.imshow(
+                pivot_df,
+                text_auto=".2f",
+                aspect="auto",
+                color_continuous_scale=HEATMAP_COLOR_SCALE,
+                labels={
+                    "x": _human_label(heat_x),
+                    "y": _human_label(heat_y),
+                    "color": _human_label(heat_z),
+                },
             )
 
         elif spec.chart_type == "funnel":

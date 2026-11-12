@@ -34,6 +34,7 @@ from src.eda_engine import (
 )
 from src.stats_analyzer import (
     ChartSpec,
+    _identify_columns,
     build_plotly_chart,
     execute_sandboxed_plotly_code,
     infer_default_chart_spec,
@@ -399,3 +400,250 @@ def test_streamlit_app_headless_smoke() -> None:
     # Verify both tabs, the headline KPI tiles, cleaning metrics, and anomaly metrics rendered cleanly
     assert len(at.tabs) >= 2
     assert len(at.metric) >= 8
+
+
+COLUMN_CLASSIFICATION_CASES = [
+    pytest.param(
+        pd.DataFrame(
+            {
+                "product_category": ["Electronics", "Furniture", "Office", "Audio"],
+                "shipping_delay_days": [0, 2, 5, 1],
+            }
+        ),
+        ["shipping_delay_days"],
+        ["product_category"],
+        None,
+        id="int-duration-days-metric",
+    ),
+    pytest.param(
+        pd.DataFrame(
+            {
+                "region": ["North", "South", "East"],
+                "product_category": ["Electronics", "Furniture", "Audio"],
+                "avg_shipping_delay_days": [1.85, 2.40, 1.10],
+            }
+        ),
+        ["avg_shipping_delay_days"],
+        ["region", "product_category"],
+        None,
+        id="float-avg-delay-days-metric",
+    ),
+    pytest.param(
+        pd.DataFrame(
+            {
+                "department": ["Sales", "Ops", "Eng"],
+                "delivery_days": [3, 4, 2],
+                "tenure_years": [2, 5, 1],
+                "warranty_months": [12, 24, 36],
+                "grace_period": [7, 14, 30],
+            }
+        ),
+        ["delivery_days", "tenure_years", "warranty_months", "grace_period"],
+        ["department"],
+        None,
+        id="uploaded-csv-duration-columns",
+    ),
+    pytest.param(
+        pd.DataFrame(
+            {
+                "order_year": [2024, 2025, 2026],
+                "month": [1, 2, 3],
+                "revenue": [100.0, 200.0, 300.0],
+            }
+        ),
+        ["revenue"],
+        ["order_year", "month"],
+        "order_year",
+        id="integer-calendar-time-columns",
+    ),
+    pytest.param(
+        pd.DataFrame(
+            {
+                "order_month": ["2026-01", "2026-02", "2026-03"],
+                "shipping_delay_days": [2, 3, 1],
+            }
+        ),
+        ["shipping_delay_days"],
+        ["order_month"],
+        "order_month",
+        id="string-calendar-plus-delay-metric",
+    ),
+    pytest.param(
+        pd.DataFrame({"order_year": [2026], "shipping_delay_days": [4]}),
+        ["order_year", "shipping_delay_days"],
+        [],
+        None,
+        id="single-row-boundary",
+    ),
+    pytest.param(
+        pd.DataFrame(
+            {
+                "is_delayed": [True, False, True],
+                "shipping_delay_days": [2, 0, 5],
+            }
+        ),
+        ["shipping_delay_days"],
+        ["is_delayed"],
+        None,
+        id="bool-excluded-from-numeric",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("df", "expected_numeric", "expected_dims", "expected_time_col"),
+    COLUMN_CLASSIFICATION_CASES,
+)
+def test_identify_columns_duration_vs_calendar(
+    df: pd.DataFrame,
+    expected_numeric: list[str],
+    expected_dims: list[str],
+    expected_time_col: str | None,
+) -> None:
+    """Verify numeric duration/delay metrics stay numeric while real calendar buckets remain time dimensions."""
+    numeric_cols, dimension_cols, time_col = _identify_columns(df)
+    assert numeric_cols == expected_numeric
+    assert dimension_cols == expected_dims
+    assert time_col == expected_time_col
+
+
+COMPLEX_CHART_CASES = [
+    pytest.param(
+        pd.DataFrame(
+            {
+                "product_category": ["Electronics", "Electronics", "Furniture", "Furniture", "Audio", "Audio"],
+                "shipping_delay_days": [1, 3, 2, 5, 0, 2],
+            }
+        ),
+        "Show a violin plot with an embedded box plot displaying the distribution and spread of shipping delay days across different product categories.",
+        "violin",
+        "violin",
+        id="violin-with-embedded-box-prompt",
+    ),
+    pytest.param(
+        pd.DataFrame(
+            {
+                "warehouse": ["East", "East", "West", "West"],
+                "delivery_days": [2, 5, 1, 4],
+            }
+        ),
+        "Plot a box plot of delivery days across warehouses.",
+        "box",
+        "box",
+        id="boxplot-uploaded-delivery-days",
+    ),
+    pytest.param(
+        pd.DataFrame(
+            {
+                "product_category": ["Electronics", "Electronics", "Furniture", "Furniture"],
+                "region": ["North", "South", "North", "South"],
+                "avg_shipping_delay_days": [1.5, 2.8, 3.1, 1.9],
+            }
+        ),
+        "Generate a 2D heatmap showing the average shipping delay days across regions on the Y-axis versus product categories on the X-axis.",
+        "heatmap",
+        "heatmap",
+        id="2d-heatmap-avg-delay-days",
+    ),
+    pytest.param(
+        pd.DataFrame(
+            {
+                "product_category": ["Electronics", "Furniture", "Audio"],
+                "avg_shipping_delay_days": [1.5, 2.8, 1.2],
+            }
+        ),
+        "Generate a 2D heatmap showing average shipping delay days across product categories.",
+        "bar",
+        "bar",
+        id="heatmap-single-dimension-fallback-bar",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("df", "question", "expected_spec_type", "expected_trace_type"),
+    COMPLEX_CHART_CASES,
+)
+def test_complex_chart_inference_and_rendering(
+    df: pd.DataFrame,
+    question: str,
+    expected_spec_type: str,
+    expected_trace_type: str,
+) -> None:
+    """Verify violin (overriding embedded box phrasing) and 2D heatmap specs infer and render cleanly."""
+    spec = infer_default_chart_spec(df, question=question)
+    assert spec.chart_type == expected_spec_type
+    fig = build_plotly_chart(df, chart_spec=spec, question=question)
+    assert fig is not None
+    assert len(fig.data) >= 1
+    assert fig.data[0].type == expected_trace_type
+
+
+CHART_EDGE_AND_ERROR_CASES = [
+    pytest.param(
+        pd.DataFrame(),
+        None,
+        "Empty table",
+        None,
+        id="empty-df-returns-none",
+    ),
+    pytest.param(
+        pd.DataFrame({"region": ["North"], "shipping_delay_days": [2.5]}),
+        None,
+        "Single row",
+        None,
+        id="single-row-returns-none",
+    ),
+    pytest.param(
+        pd.DataFrame({"region": ["North", "South"], "shipping_delay_days": [2.0, 3.0]}),
+        ChartSpec(chart_type="none", title="Scalar"),
+        "None spec",
+        None,
+        id="explicit-none-spec-returns-none",
+    ),
+    pytest.param(
+        pd.DataFrame(
+            {
+                "product_category": ["Electronics", "Electronics", "Furniture", "Furniture"],
+                "region": ["North", "South", "North", "South"],
+                "avg_shipping_delay_days": [1.5, 2.8, 3.1, 1.9],
+            }
+        ),
+        ChartSpec(
+            chart_type="heatmap",
+            x_col="product_category",
+            y_col="region",
+            color_col="avg_shipping_delay_days",
+            title="Heatmap Custom Orientation",
+        ),
+        "Heatmap explicit axes",
+        "heatmap",
+        id="heatmap-with-dim-as-y-col-and-metric-as-color",
+    ),
+    pytest.param(
+        pd.DataFrame({"product_category": ["A", "B"], "shipping_delay_days": [1.0, 2.0]}),
+        ChartSpec(chart_type="bar", x_col="missing_col", y_col="shipping_delay_days"),
+        "Show bar chart",
+        "bar",
+        id="mismatched-spec-recovers-via-fallback",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("df", "spec", "question", "expected_trace_type"),
+    CHART_EDGE_AND_ERROR_CASES,
+)
+def test_build_plotly_chart_edge_and_error_cases(
+    df: pd.DataFrame,
+    spec: ChartSpec | None,
+    question: str,
+    expected_trace_type: str | None,
+) -> None:
+    """Verify boundary inputs, alternative spec orientations, and invalid-column fallbacks."""
+    fig = build_plotly_chart(df, chart_spec=spec, question=question)
+    if expected_trace_type is None:
+        assert fig is None
+    else:
+        assert fig is not None
+        assert fig.data[0].type == expected_trace_type
