@@ -6,15 +6,20 @@
 
 An open-source AI data analyst built with **Streamlit**, **LangGraph**, **Groq**, and **Python** that explores CSV files, messy spreadsheets, or live PostgreSQL / Supabase databases without letting the LLM guess numbers.
 
+[![Open Live App](https://img.shields.io/badge/Open_Live_App-datagenie--analytics.streamlit.app-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://datagenie-analytics.streamlit.app/)
+
 [![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB.svg?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Streamlit 1.58+](https://img.shields.io/badge/Streamlit-1.58+-FF4B4B.svg?style=flat-square&logo=streamlit&logoColor=white)](https://streamlit.io/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-v1-111111.svg?style=flat-square)](https://github.com/langchain-ai/langgraph)
 [![Groq](https://img.shields.io/badge/Groq-API-F55036.svg?style=flat-square)](https://groq.com/)
-[![Tests](https://img.shields.io/badge/Tests-159_passing-2EA043.svg?style=flat-square)](#-testing)
+[![Tests](https://img.shields.io/badge/Tests-159_passing-2EA043.svg?style=flat-square)](#testing)
 
-[Features](#what-makes-datagenie-different) • [How It Works](#how-it-works) • [Project Structure](#project-structure) • [Quickstart](#quickstart) • [Deployment](#deployment)
+[Live App](https://datagenie-analytics.streamlit.app/) • [Architecture](#architecture) • [Key Features](#key-features) • [Project Structure](#project-structure) • [Quickstart](#quickstart) • [Deployment](#deployment)
 
 </div>
+
+> **Try it now — no setup required:** **[https://datagenie-analytics.streamlit.app/](https://datagenie-analytics.streamlit.app/)**
+> Open the link, try the built-in retail dataset (or upload your own CSV), and inspect every SQL query and Plotly chart in the UI.
 
 ---
 
@@ -51,18 +56,33 @@ Every answer comes with an **"Under the hood"** panel showing the exact SQL quer
 
 ---
 
-## How It Works
+## Architecture
 
-Each question flows through a 4-node **LangGraph** pipeline:
+DataGenie connects three clear layers from raw data to verified answers:
 
 ```mermaid
-flowchart LR
-    Q["User Question"] --> W["1. SQL Writer<br/>(Schema + Sample Values)"]
-    W --> C["2. SQL Critic & Executor<br/>(Read-Only Check + Run)"]
-    C -- "Error or 0 rows<br/>(retry up to 3x)" --> W
-    C -- "Valid DataFrame" --> S["3. Stats & Chart Node<br/>(Python Math + AST-Sandboxed Plotly)"]
-    S --> I["4. Insight Analyst<br/>(Summary + Next Actions)"]
-    I --> UI["Streamlit Answer + Interactive Chart + SQL/Code Trace"]
+flowchart TD
+    subgraph DATA["1. Data Layer (demo_data.py · data_cleaning.py · db_manager.py)"]
+        Sources["Demo Dataset / CSV Upload"] --> Cleaner["clean_dataframe()<br/>Currencies, %, Mixed Dates, Nulls, Duplicates"]
+        Cleaner --> SQLite[("In-Session SQLite DB")]
+        PG[("PostgreSQL / Supabase URI")] --> DB["DatabaseManager<br/>Schema + Sample Values + Read-Only SQL Guard"]
+        SQLite --> DB
+    end
+
+    subgraph AGENTS["2. LangGraph Pipeline & Sandboxes (agent_graph.py · stats_analyzer.py)"]
+        Question["User Question in Plain English"] --> Writer["1. SQL Writer Node<br/>Groq LLM + Table Schema"]
+        DB -.->|"Read-Only Schema Context"| Writer
+        Writer --> Critic["2. SQL Critic & Executor<br/>validate_readonly_sql() + Query Run"]
+        Critic -->|"SQL Error or 0 Rows<br/>Retry up to 3x"| Writer
+        Critic -->|"Validated DataFrame"| Stats["3. Stats & Chart Node<br/>Python Math + AST-Sandboxed Plotly<br/>(+ Fallback Chart Builder)"]
+        Stats --> Analyst["4. Insight Analyst Node<br/>Summary Grounded in Real Figures"]
+    end
+
+    subgraph FRONTEND["3. Streamlit UI & Auto-EDA (app.py · eda_engine.py · ui.py)"]
+        DB -.->|"Headline KPI Strip"| AskTab
+        Analyst --> AskTab["Tab 1: Ask DataGenie<br/>Summary · Plotly Chart · Under-the-Hood SQL & Code"]
+        Cleaner --> HealthTab["Tab 2: Data health<br/>Before/After Audit · IsolationForest Anomalies · Correlations"]
+    end
 ```
 
 ### Example Walkthrough (Demo Dataset)
@@ -121,6 +141,8 @@ In the sidebar, DataGenie checks your Groq API key live and lets you switch betw
 ---
 
 ## Quickstart
+
+> Want to test it right away without installing anything? Open the live app at **[https://datagenie-analytics.streamlit.app/](https://datagenie-analytics.streamlit.app/)**.
 
 ### Prerequisites
 - **Python 3.12**
