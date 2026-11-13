@@ -32,7 +32,7 @@ COLOR_SECONDARY = "#38BDF8"
 COLOR_GRID = "rgba(148, 163, 184, 0.18)"
 COLOR_MUTED = "#94A3B8"
 
-# Column-classification and visualization configuration constants
+# Column-classification, unit-formatting, and visualization configuration constants
 TIME_DIMENSION_WORDS: frozenset[str] = frozenset(
     {"date", "month", "year", "week", "quarter", "period", "yr", "qtr", "fiscal"}
 )
@@ -67,31 +67,401 @@ DURATION_METRIC_WORDS: frozenset[str] = frozenset(
         "stay",
     }
 )
+ID_CODE_EXACT_NAMES: frozenset[str] = frozenset(
+    {"id", "code", "zip", "zipcode", "postcode", "postal_code", "zip_code", "sku", "upc", "isbn"}
+)
+ID_CODE_SUFFIX_TOKENS: frozenset[str] = frozenset(
+    {"id", "code", "zipcode", "postcode", "sku", "upc", "isbn", "key"}
+)
+ID_CODE_PREFIX_TOKENS: frozenset[str] = frozenset({"zip", "zipcode", "postcode", "postal"})
+BOOL_INDICATOR_PREFIX_TOKENS: frozenset[str] = frozenset({"is", "has", "was", "can", "should"})
+BOOL_INDICATOR_SUFFIX_TOKENS: frozenset[str] = frozenset({"flag", "bool"})
+PERCENT_UNIT_TOKENS: frozenset[str] = frozenset(
+    {"pct", "percent", "percentage", "margin", "rate", "share", "ratio", "ctr", "cvr", "roi", "roas"}
+)
+EXPLICIT_PERCENT_HEAD_TOKENS: frozenset[str] = frozenset(
+    {"pct", "percent", "percentage", "share"}
+)
+STRICT_COUNT_TOKENS: frozenset[str] = frozenset(
+    {
+        "count",
+        "cnt",
+        "num",
+        "qty",
+        "quantity",
+        "records",
+        "rows",
+        "rating",
+        "score",
+        "rank",
+        "index",
+        "days",
+        "hours",
+        "minutes",
+        "seconds",
+        "months",
+        "years",
+        "weeks",
+    }
+)
+ENTITY_COUNT_TOKENS: frozenset[str] = frozenset(
+    {
+        "units",
+        "orders",
+        "items",
+        "transactions",
+        "txns",
+        "sessions",
+        "visits",
+        "clicks",
+        "users",
+        "customers",
+    }
+)
+COUNT_UNIT_TOKENS: frozenset[str] = STRICT_COUNT_TOKENS | ENTITY_COUNT_TOKENS
+COUNT_MARKER_TOKENS: frozenset[str] = frozenset({"count", "cnt", "num", "qty", "quantity", "rank", "score", "index"})
+CURRENCY_UNIT_TOKENS: frozenset[str] = frozenset(
+    {
+        "revenue",
+        "profit",
+        "sales",
+        "amount",
+        "amt",
+        "price",
+        "cost",
+        "spend",
+        "budget",
+        "income",
+        "earnings",
+        "salary",
+        "wage",
+        "fee",
+        "fees",
+        "subtotal",
+        "usd",
+        "dollar",
+        "dollars",
+        "arr",
+        "mrr",
+        "gmv",
+        "ltv",
+        "cac",
+        "arpu",
+        "aov",
+    }
+)
+ADDITIVE_CURRENCY_HEAD_TOKENS: frozenset[str] = frozenset(
+    {
+        "revenue",
+        "profit",
+        "sales",
+        "amount",
+        "amt",
+        "spend",
+        "budget",
+        "income",
+        "earnings",
+        "salary",
+        "wage",
+        "fee",
+        "fees",
+        "subtotal",
+        "usd",
+        "dollar",
+        "dollars",
+        "gmv",
+    }
+)
+NON_ADDITIVE_TOKENS: frozenset[str] = PERCENT_UNIT_TOKENS | frozenset(
+    {
+        "avg",
+        "average",
+        "mean",
+        "median",
+        "min",
+        "max",
+        "std",
+        "stddev",
+        "variance",
+        "aov",
+        "arpu",
+        "cac",
+        "delay",
+        "delays",
+        "duration",
+        "latency",
+        "tenure",
+        "age",
+        "warranty",
+        "rating",
+        "score",
+        "index",
+        "days",
+        "per",
+    }
+)
+AGGREGATE_STAT_TOKENS: frozenset[str] = frozenset(
+    {"avg", "average", "mean", "median", "min", "max", "std", "stddev", "variance", "per"}
+)
+PREFERRED_ADDITIVE_METRIC_TOKENS: tuple[str, ...] = (
+    "revenue",
+    "sales",
+    "profit",
+    "amount",
+    "units",
+    "quantity",
+    "orders",
+    "total",
+    "count",
+)
+PREFERRED_ANY_METRIC_TOKENS: tuple[str, ...] = (
+    "revenue",
+    "sales",
+    "profit",
+    "margin",
+    "amount",
+    "units",
+    "total",
+    "count",
+)
+
 MAX_NUMERIC_TIME_CARDINALITY = 60
+MAX_PIE_SLICE_COUNT = 8
+MAX_EXPLICIT_PIE_SLICE_COUNT = 12
+MAX_SCATTER_COLOR_CARDINALITY = 12
+DEFAULT_COMPACT_K_THRESHOLD = 1_000.0
+KPI_COMPACT_K_THRESHOLD = 10_000.0
 HEATMAP_COLOR_SCALE = "YlOrRd"
+UNSUPPORTED_TRENDLINES: frozenset[str] = frozenset({"ols", "lowess"})
+
+_CHART_VIOLIN_RE = re.compile(r"\bviolins?\b", re.IGNORECASE)
+_CHART_BOX_RE = re.compile(
+    r"\b(?:box\s*[-\s]?\s*(?:plots?|charts?)|boxplots?|box(?:\s*[-\s]?\s*(?:&|and)\s*[-\s]?\s*|\s*-\s*)whiskers?|whiskers?\s*plots?)\b",
+    re.IGNORECASE,
+)
+_CHART_HEATMAP_RE = re.compile(r"\b(?:heatmaps?|heat\s*[-\s]?\s*maps?)\b", re.IGNORECASE)
+_CHART_HISTOGRAM_RE = re.compile(r"\bhistograms?\b", re.IGNORECASE)
+_CHART_TREEMAP_RE = re.compile(r"\b(?:treemaps?|tree\s*[-\s]?\s*maps?)\b", re.IGNORECASE)
+_CHART_FUNNEL_RE = re.compile(r"\bfunnels?\b", re.IGNORECASE)
+_CHART_SCATTER_RE = re.compile(
+    r"\b(?:scatter|scatterplots?|scatter\s*[-\s]?\s*(?:plots?|charts?|graphs?))\b",
+    re.IGNORECASE,
+)
+_CHART_DONUT_RE = re.compile(r"\b(?:donuts?|doughnuts?)\b", re.IGNORECASE)
+_CHART_PIE_RE = re.compile(r"\bpie\b", re.IGNORECASE)
+_CHART_SHARE_RE = re.compile(r"\bshare\b", re.IGNORECASE)
+_CHART_AREA_RE = re.compile(
+    r"\b(?:stacked\s+area|area\s*[-\s]?\s*(?:charts?|plots?|graphs?)|as\s+an?\s+area)\b",
+    re.IGNORECASE,
+)
+_CHART_NEGATION_PREFIX_RE = re.compile(
+    r"\b(?:"
+    r"do(?:es)?\s+not|don'?t|doesn'?t|"
+    r"should\s+not|shouldn'?t|"
+    r"would\s+not|wouldn'?t|"
+    r"could\s+not|couldn'?t|"
+    r"can(?:\s+not|'?t)|cannot|"
+    r"will\s+not|won'?t|"
+    r"instead\s+of|rather\s+than|other\s+than|apart\s+from|"
+    r"without|avoid(?:ing|ed|s)?|exclud(?:e|ing|ed|es)|"
+    r"skip(?:ping|ped|s)?|omit(?:ting|ted|s)?|"
+    r"except|besides|neither|nor|never|not|no|non"
+    r")"
+    r"(?:\s+(?:us(?:e|ing)|show(?:ing)?|plot(?:ting)?|draw(?:ing)?|mak(?:e|ing)|"
+    r"build(?:ing)?|render(?:ing)?|generat(?:e|ing)|creat(?:e|ing)|"
+    r"display(?:ing)?|add(?:ing)?|includ(?:e|ing)|embed(?:ding)?))?"
+    r"(?:\s+(?:a|an|the|any))?"
+    r"(?:\s+(?:embedded|inline|stacked|grouped|simple|basic|standard|extra|another|style|styled))*"
+    r"(?:\s+[a-z]+(?:[-\s]+[a-z]+){0,2}\s+(?:or|nor)(?:\s+(?:a|an|the|any))?"
+    r"(?:\s+(?:embedded|inline|stacked|grouped|simple|basic|standard|extra|another|style|styled))*)?"
+    r"(?:\s+|-)$",
+    re.IGNORECASE,
+)
+
+
+def _has_chart_intent(question: str, pattern: re.Pattern[str]) -> bool:
+    """Return True if `pattern` matches `question` outside a negated phrase."""
+    if not question:
+        return False
+    for match in pattern.finditer(question):
+        if not _CHART_NEGATION_PREFIX_RE.search(question[: match.start()]):
+            return True
+    return False
+
+
+def tokenize_col_name(col_name: str) -> list[str]:
+    """Split snake_case, kebab-case, and camelCase column names into lowercase word tokens."""
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(col_name))
+    return [tok for tok in re.split(r"[^a-z0-9]+", snake.lower()) if tok]
+
+
+def is_id_or_code_column(col_name: str) -> bool:
+    """Return True if `col_name` denotes an identifier, key, code, or postal/zip column."""
+    normalized = re.sub(r"[^a-z0-9_]+", "_", str(col_name).strip().lower()).strip("_")
+    if normalized in ID_CODE_EXACT_NAMES:
+        return True
+    tokens = tokenize_col_name(col_name)
+    if not tokens:
+        return False
+    token_set = set(tokens)
+    if tokens[-1] in ID_CODE_SUFFIX_TOKENS:
+        return True
+    if tokens[0] == "id" and not (token_set & {"count", "cnt", "num", "total"}):
+        return True
+    if tokens[0] in ID_CODE_PREFIX_TOKENS and not (
+        token_set & (CURRENCY_UNIT_TOKENS | PERCENT_UNIT_TOKENS | {"count", "cnt", "num", "total", "units", "avg"})
+    ):
+        return True
+    return False
+
+
+def is_binary_bool_indicator(col_name: str, series: pd.Series) -> bool:
+    """Return True for numeric `{0, 1}` boolean flag columns (e.g., SQLite-roundtripped `is_*`)."""
+    if pd.api.types.is_bool_dtype(series):
+        return True
+    if not pd.api.types.is_numeric_dtype(series):
+        return False
+    tokens = tokenize_col_name(col_name)
+    if not tokens:
+        return False
+    is_bool_named = (
+        tokens[0] in BOOL_INDICATOR_PREFIX_TOKENS or tokens[-1] in BOOL_INDICATOR_SUFFIX_TOKENS
+    )
+    if not is_bool_named:
+        return False
+    token_set = set(tokens)
+    if token_set & (
+        PERCENT_UNIT_TOKENS
+        | CURRENCY_UNIT_TOKENS
+        | {"count", "cnt", "num", "sum", "total", "avg", "mean", "median", "min", "max", "score", "days", "hours"}
+    ):
+        return False
+    non_null = series.dropna()
+    if non_null.empty:
+        return False
+    try:
+        return set(non_null.unique()).issubset({0, 1, 0.0, 1.0})
+    except TypeError:
+        return False
+
+
+def is_quantitative_numeric_series(col_name: str, series: pd.Series) -> bool:
+    """Return True if `series` is a quantitative numeric measure (excluding bools and IDs/codes)."""
+    if pd.api.types.is_bool_dtype(series):
+        return False
+    if not pd.api.types.is_numeric_dtype(series):
+        return False
+    if is_id_or_code_column(col_name):
+        return False
+    if is_binary_bool_indicator(col_name, series):
+        return False
+    return True
+
+
+def get_quantitative_numeric_columns(df: pd.DataFrame) -> list[str]:
+    """Return DataFrame column names that represent quantitative numeric measures."""
+    return [str(col) for col in df.columns if is_quantitative_numeric_series(str(col), df[col])]
+
+
+def is_non_additive_metric(col_name: str) -> bool:
+    """Return True for rates, percentages, margins, averages, ratios, and delays that should not be summed."""
+    tokens = tokenize_col_name(col_name)
+    if not tokens:
+        return False
+    token_set = set(tokens)
+    if token_set & AGGREGATE_STAT_TOKENS:
+        return True
+    if tokens[-1] in {"count", "cnt", "num"} or tokens[0] in {"count", "cnt", "num"}:
+        return False
+    if "unit" in token_set and bool(token_set & {"price", "cost"}):
+        return True
+    if tokens[-1] in ENTITY_COUNT_TOKENS and tokens[0] not in EXPLICIT_PERCENT_HEAD_TOKENS:
+        return False
+    if tokens[-1] in ADDITIVE_CURRENCY_HEAD_TOKENS and not (
+        token_set & (EXPLICIT_PERCENT_HEAD_TOKENS | {"unit"})
+    ):
+        return False
+    if token_set & NON_ADDITIVE_TOKENS:
+        if tokens[0] in {"total", "sum"} and not (
+            token_set
+            & (PERCENT_UNIT_TOKENS | {"delay", "delays", "duration", "latency"})
+        ):
+            return False
+        return True
+    return False
+
+
+def classify_metric_unit(col_name: str) -> Literal["percent", "currency", "none"]:
+    """Classify a metric column into mutually exclusive units (`percent`, `currency`, or `none`)."""
+    tokens = tokenize_col_name(col_name)
+    if not tokens:
+        return "none"
+    if "per" in tokens:
+        prefix_tokens = tokens[: tokens.index("per")]
+        unit_tokens = prefix_tokens or tokens
+    else:
+        unit_tokens = tokens
+    token_set = set(unit_tokens)
+    last_tok = unit_tokens[-1]
+
+    if last_tok in COUNT_MARKER_TOKENS or unit_tokens[0] in {"count", "cnt", "num"}:
+        return "none"
+    if last_tok in CURRENCY_UNIT_TOKENS and not (token_set & EXPLICIT_PERCENT_HEAD_TOKENS):
+        return "currency"
+    if last_tok in PERCENT_UNIT_TOKENS:
+        return "percent"
+    if last_tok in ENTITY_COUNT_TOKENS:
+        if token_set & EXPLICIT_PERCENT_HEAD_TOKENS:
+            return "percent"
+        return "none"
+    if token_set & PERCENT_UNIT_TOKENS:
+        return "percent"
+    if token_set & COUNT_UNIT_TOKENS:
+        return "none"
+    if token_set & CURRENCY_UNIT_TOKENS:
+        return "currency"
+    return "none"
+
+
+def get_metric_unit_affixes(col_name: str) -> tuple[str, str]:
+    """Return mutually exclusive `(prefix, suffix)` strings for chart labels and tooltips."""
+    unit = classify_metric_unit(col_name)
+    if unit == "percent":
+        return "", "%"
+    if unit == "currency":
+        return "$", ""
+    return "", ""
+
+
+def format_metric_value(
+    val: float,
+    col_name: str,
+    *,
+    compact_k_threshold: float = DEFAULT_COMPACT_K_THRESHOLD,
+) -> str:
+    """Format numerical values cleanly for direct chart labels and KPI tiles (e.g. $145.0K, -$12.5K, 38.5%)."""
+    if pd.isna(val):
+        return ""
+    unit = classify_metric_unit(col_name)
+    if unit == "percent":
+        return f"{float(val):.1f}%"
+
+    prefix = "$" if unit == "currency" else ""
+    sign = "-" if val < 0 else ""
+    abs_v = abs(float(val))
+
+    if abs_v >= 1_000_000:
+        return f"{sign}{prefix}{abs_v / 1_000_000:.2f}M"
+    if abs_v >= compact_k_threshold:
+        return f"{sign}{prefix}{abs_v / 1_000:.1f}K"
+    if abs_v.is_integer():
+        return f"{sign}{prefix}{int(abs_v):,}"
+    return f"{sign}{prefix}{abs_v:,.1f}"
 
 
 def _format_data_value(val: float, col_name: str) -> str:
     """Format numerical values cleanly for direct chart labels (e.g. $145K, 38.5%)."""
-    if pd.isna(val):
-        return ""
-    col_lower = col_name.lower()
-    is_money = any(k in col_lower for k in ("revenue", "profit", "sales", "amount", "price", "cost"))
-    is_pct = any(k in col_lower for k in ("pct", "percent", "margin", "rate", "share"))
-    prefix = "$" if is_money else ""
-    suffix = "%" if is_pct else ""
-
-    abs_v = abs(val)
-    if is_pct:
-        return f"{val:.1f}%"
-    elif abs_v >= 1_000_000:
-        return f"{prefix}{val / 1_000_000:.2f}M{suffix}"
-    elif abs_v >= 1_000:
-        return f"{prefix}{val / 1_000:.1f}K{suffix}"
-    elif float(val).is_integer():
-        return f"{prefix}{int(val):,}{suffix}"
-    else:
-        return f"{prefix}{val:,.1f}{suffix}"
+    return format_metric_value(val, col_name, compact_k_threshold=DEFAULT_COMPACT_K_THRESHOLD)
 
 
 class ChartSpec(BaseModel):
@@ -143,10 +513,30 @@ def _human_label(col_name: str) -> str:
 
 def _is_calendar_time_name(col_name: str) -> bool:
     """Return True if a column name refers to a calendar bucket rather than a duration metric."""
-    words = {w for w in re.split(r"[^a-z0-9]+", str(col_name).lower()) if w}
+    words = set(tokenize_col_name(col_name))
     if not words or (words & DURATION_METRIC_WORDS):
         return False
     return bool(words & TIME_DIMENSION_WORDS)
+
+
+def _select_primary_metric(numeric_cols: list[str]) -> str:
+    """Select the primary numeric measure, preferring additive business metrics over ratios/delays."""
+    additive_cols = [c for c in numeric_cols if not is_non_additive_metric(c)]
+
+    for pref in PREFERRED_ADDITIVE_METRIC_TOKENS:
+        matched = next((c for c in additive_cols if pref in tokenize_col_name(c)), None)
+        if matched is not None:
+            return matched
+
+    if additive_cols:
+        return additive_cols[0]
+
+    for pref in PREFERRED_ANY_METRIC_TOKENS:
+        matched = next((c for c in numeric_cols if pref in tokenize_col_name(c)), None)
+        if matched is not None:
+            return matched
+
+    return numeric_cols[0]
 
 
 def _identify_columns(df: pd.DataFrame) -> tuple[list[str], list[str], str | None]:
@@ -157,13 +547,20 @@ def _identify_columns(df: pd.DataFrame) -> tuple[list[str], list[str], str | Non
 
     for col in df.columns:
         s = df[col]
-        is_time_named = _is_calendar_time_name(str(col))
+        col_str = str(col)
+        is_time_named = _is_calendar_time_name(col_str)
 
         if pd.api.types.is_datetime64_any_dtype(s):
             dimension_cols.append(col)
             if time_col is None:
                 time_col = col
-        elif pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
+        elif pd.api.types.is_bool_dtype(s):
+            dimension_cols.append(col)
+        elif is_id_or_code_column(col_str):
+            dimension_cols.append(col)
+        elif is_binary_bool_indicator(col_str, s):
+            dimension_cols.append(col)
+        elif pd.api.types.is_numeric_dtype(s):
             # Only treat integer calendar columns (e.g. year=2026, month=1..12) as time dimensions;
             # float columns and duration/delay/count metrics must remain numeric measures.
             is_integer_calendar = (
@@ -213,14 +610,8 @@ def run_statistical_checks(df: pd.DataFrame) -> dict[str, Any]:
             "outliers": [],
         }
 
-    # Pick primary metric (prefer revenue/sales/profit/total/count over rates/delays)
-    primary_metric = numeric_cols[0]
-    preferred = ("revenue", "sales", "profit", "margin", "amount", "units", "total", "count")
-    for pref in preferred:
-        matched = next((c for c in numeric_cols if pref in c.lower()), None)
-        if matched is not None:
-            primary_metric = matched
-            break
+    primary_metric = _select_primary_metric(numeric_cols)
+    primary_is_non_additive = is_non_additive_metric(primary_metric)
 
     s_num = pd.to_numeric(df[primary_metric], errors="coerce").dropna()
     if s_num.empty:
@@ -241,17 +632,25 @@ def run_statistical_checks(df: pd.DataFrame) -> dict[str, Any]:
     std_val = float(s_num.std(ddof=0)) if len(s_num) > 1 else 0.0
 
     metrics_info: dict[str, Any] = {
-        "total": round(total_val, 2),
         "mean": round(mean_val, 2),
         "median": round(median_val, 2),
         "min": round(min_val, 2),
         "max": round(max_val, 2),
         "std": round(std_val, 2),
+        "is_non_additive": primary_is_non_additive,
     }
+    if not primary_is_non_additive:
+        metrics_info["total"] = round(total_val, 2)
 
     metric_label = _human_label(primary_metric)
     if row_count == 1:
-        summary_lines.append(f"{metric_label}: {total_val:,.2f}")
+        single_val = mean_val if primary_is_non_additive else total_val
+        summary_lines.append(f"{metric_label}: {single_val:,.2f}")
+    elif primary_is_non_additive:
+        summary_lines.append(
+            f"{metric_label} — Mean: {mean_val:,.2f} | Median: {median_val:,.2f} "
+            f"(Min: {min_val:,.2f}, Max: {max_val:,.2f})"
+        )
     else:
         summary_lines.append(
             f"{metric_label} — Total: {total_val:,.2f} | Mean: {mean_val:,.2f} | Median: {median_val:,.2f}"
@@ -269,7 +668,6 @@ def run_statistical_checks(df: pd.DataFrame) -> dict[str, Any]:
             bot_val = float(bot_row[primary_metric])
 
             if label_col is not None:
-                # Build readable label across up to 2 dimension columns
                 dim_label_cols = dimension_cols[:2]
                 top_name = " · ".join(str(top_row[c]) for c in dim_label_cols)
                 bot_name = " · ".join(str(bot_row[c]) for c in dim_label_cols)
@@ -277,7 +675,7 @@ def run_statistical_checks(df: pd.DataFrame) -> dict[str, Any]:
                 top_name = f"Row {top_row.name}"
                 bot_name = f"Row {bot_row.name}"
 
-            if total_val > 0 and float(valid_df[primary_metric].min()) >= 0:
+            if not primary_is_non_additive and total_val > 0 and float(valid_df[primary_metric].min()) >= 0:
                 top_share = (top_val / total_val) * 100.0
                 bot_share = (bot_val / total_val) * 100.0
                 summary_lines.append(
@@ -302,10 +700,11 @@ def run_statistical_checks(df: pd.DataFrame) -> dict[str, Any]:
 
     # Period-over-Period delta when a time column is present
     if time_col is not None and row_count >= 2:
+        period_agg = "mean" if primary_is_non_additive else "sum"
         time_grouped = (
             df.dropna(subset=[time_col, primary_metric])
             .groupby(time_col, as_index=False)[primary_metric]
-            .sum()
+            .agg(period_agg)
             .sort_values(time_col)
         )
         if len(time_grouped) >= 2:
@@ -322,12 +721,13 @@ def run_statistical_checks(df: pd.DataFrame) -> dict[str, Any]:
                 )
 
     # Secondary numeric columns quick averages/sums (helpful on multi-metric root-cause queries)
-    for sec_col in numeric_cols[1:4]:
+    secondary_cols = [c for c in numeric_cols if c != primary_metric][:3]
+    for sec_col in secondary_cols:
         sec_s = pd.to_numeric(df[sec_col], errors="coerce").dropna()
         if sec_s.empty:
             continue
         sec_label = _human_label(sec_col)
-        if any(tok in sec_col.lower() for tok in ("pct", "rate", "margin", "delay", "avg")):
+        if is_non_additive_metric(sec_col):
             summary_lines.append(
                 f"{sec_label} — Mean: {float(sec_s.mean()):,.2f} (Min: {float(sec_s.min()):,.2f}, Max: {float(sec_s.max()):,.2f})"
             )
@@ -377,7 +777,6 @@ ALLOWED_SANDBOX_MODULES = {
     "numpy",
     "np",
     "scipy",
-    "statsmodels",
 }
 
 FORBIDDEN_SANDBOX_NAMES = {
@@ -484,6 +883,15 @@ def is_plotly_code_safe(code_str: str) -> tuple[bool, str]:
             if node.attr.startswith("__"):
                 return False, f"Forbidden attribute access: {node.attr}"
 
+        # 4. Block Plotly trendlines that require uninstalled statsmodels
+        elif isinstance(node, ast.keyword) and node.arg == "trendline":
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                if node.value.value.strip().lower() in UNSUPPORTED_TRENDLINES:
+                    return (
+                        False,
+                        f"Unsupported Plotly trendline '{node.value.value}' requires uninstalled 'statsmodels'.",
+                    )
+
     return True, "Safe"
 
 
@@ -586,6 +994,11 @@ def execute_sandboxed_plotly_code(
     return candidate_fig
 
 
+def _is_numeric_non_bool(series: pd.Series) -> bool:
+    """Return True if `series` has a numeric dtype and is not boolean."""
+    return bool(pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series))
+
+
 def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
     """Deterministic fallback ChartSpec builder when LLM output is omitted or mismatched."""
     if df is None or len(df) < 2:
@@ -595,16 +1008,9 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
     if not numeric_cols:
         return ChartSpec(chart_type="none", title="Query Result")
 
-    y_col = numeric_cols[0]
-    for pref in ("revenue", "sales", "margin", "profit", "units", "total", "count"):
-        matched = next((c for c in numeric_cols if pref in c.lower()), None)
-        if matched is not None:
-            y_col = matched
-            break
+    y_col = _select_primary_metric(numeric_cols)
 
-    q_lower = question.lower()
-
-    if "violin" in q_lower:
+    if _has_chart_intent(question, _CHART_VIOLIN_RE):
         x_col = dimension_cols[0] if dimension_cols else ""
         return ChartSpec(
             chart_type="violin",
@@ -614,7 +1020,7 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
             title=f"{_human_label(y_col)} Violin Distribution" + (f" by {_human_label(x_col)}" if x_col else ""),
         )
 
-    if "box" in q_lower or "boxplot" in q_lower:
+    if _has_chart_intent(question, _CHART_BOX_RE):
         x_col = dimension_cols[0] if dimension_cols else ""
         return ChartSpec(
             chart_type="box",
@@ -624,7 +1030,7 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
             title=f"{_human_label(y_col)} Distribution" + (f" by {_human_label(x_col)}" if x_col else ""),
         )
 
-    if "heatmap" in q_lower or "heat map" in q_lower:
+    if _has_chart_intent(question, _CHART_HEATMAP_RE):
         if len(dimension_cols) >= 2:
             return ChartSpec(
                 chart_type="heatmap",
@@ -634,7 +1040,7 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
                 title=f"{_human_label(y_col)} Heatmap ({_human_label(dimension_cols[0])} × {_human_label(dimension_cols[1])})",
             )
 
-    if "histogram" in q_lower:
+    if _has_chart_intent(question, _CHART_HISTOGRAM_RE):
         return ChartSpec(
             chart_type="histogram",
             x_col=y_col,
@@ -642,15 +1048,66 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
             title=f"{_human_label(y_col)} Frequency Distribution",
         )
 
-    if "treemap" in q_lower:
-        x_col = dimension_cols[0] if dimension_cols else ""
+    if _has_chart_intent(question, _CHART_TREEMAP_RE) and dimension_cols:
+        x_col = dimension_cols[0]
         return ChartSpec(
             chart_type="treemap",
             x_col=x_col,
             y_col=y_col,
             color_col=dimension_cols[1] if len(dimension_cols) >= 2 else None,
-            title=f"{_human_label(y_col)} Treemap" + (f" by {_human_label(x_col)}" if x_col else ""),
+            title=f"{_human_label(y_col)} Treemap by {_human_label(x_col)}",
         )
+
+    if _has_chart_intent(question, _CHART_FUNNEL_RE) and dimension_cols:
+        x_col = dimension_cols[0]
+        return ChartSpec(
+            chart_type="funnel",
+            x_col=x_col,
+            y_col=y_col,
+            color_col=dimension_cols[1] if len(dimension_cols) >= 2 else None,
+            title=f"{_human_label(y_col)} Funnel by {_human_label(x_col)}",
+        )
+
+    if _has_chart_intent(question, _CHART_SCATTER_RE) and len(numeric_cols) >= 2:
+        scatter_y = y_col
+        other_nums = [c for c in numeric_cols if c != scatter_y]
+        scatter_x = other_nums[0]
+        non_id_dims = [c for c in dimension_cols if not is_id_or_code_column(c)]
+        non_time_dims = [c for c in non_id_dims if c != time_col]
+        color_candidates = non_time_dims or non_id_dims
+        scatter_color = next(
+            (
+                c
+                for c in color_candidates
+                if 2 <= int(df[c].nunique(dropna=True)) <= MAX_SCATTER_COLOR_CARDINALITY
+            ),
+            None,
+        )
+        return ChartSpec(
+            chart_type="scatter",
+            x_col=scatter_x,
+            y_col=scatter_y,
+            color_col=scatter_color,
+            title=f"{_human_label(scatter_y)} vs {_human_label(scatter_x)}",
+        )
+
+    if (_has_chart_intent(question, _CHART_DONUT_RE) or _has_chart_intent(question, _CHART_PIE_RE)) and dimension_cols:
+        pie_dims = [c for c in dimension_cols if c != time_col] or dimension_cols
+        x_col = pie_dims[0]
+        color_col = pie_dims[1] if len(pie_dims) >= 2 else None
+        y_min = pd.to_numeric(df[y_col], errors="coerce").min()
+        if (
+            color_col is None
+            and int(df[x_col].nunique(dropna=True)) <= MAX_EXPLICIT_PIE_SLICE_COUNT
+            and pd.notna(y_min)
+            and float(y_min) >= 0
+        ):
+            return ChartSpec(
+                chart_type="pie",
+                x_col=x_col,
+                y_col=y_col,
+                title=f"{_human_label(y_col)} Share by {_human_label(x_col)}",
+            )
 
     if time_col is not None:
         other_dims = [c for c in dimension_cols if c != time_col]
@@ -666,7 +1123,9 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
                 title=f"{_human_label(y_col)} by {_human_label(color_col)} ({_human_label(time_col)})",
                 sort_descending=False,
             )
-        chart_kind: Literal["line", "area", "bar"] = "area" if "area" in q_lower else "line"
+        chart_kind: Literal["line", "area", "bar"] = (
+            "area" if _has_chart_intent(question, _CHART_AREA_RE) else "line"
+        )
         return ChartSpec(
             chart_type=chart_kind,
             x_col=time_col,
@@ -679,8 +1138,14 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
     if dimension_cols:
         x_col = dimension_cols[0]
         color_col = dimension_cols[1] if len(dimension_cols) >= 2 else None
-        if "pie" in q_lower or "share" in q_lower:
-            if color_col is None and len(df) <= 8 and float(df[y_col].min()) >= 0:
+        if _has_chart_intent(question, _CHART_SHARE_RE):
+            y_min = pd.to_numeric(df[y_col], errors="coerce").min()
+            if (
+                color_col is None
+                and len(df) <= MAX_PIE_SLICE_COUNT
+                and pd.notna(y_min)
+                and float(y_min) >= 0
+            ):
                 return ChartSpec(
                     chart_type="pie",
                     x_col=x_col,
@@ -697,14 +1162,22 @@ def infer_default_chart_spec(df: pd.DataFrame, question: str = "") -> ChartSpec:
         )
 
     if len(numeric_cols) >= 2:
+        scatter_y = y_col
+        other_nums = [c for c in numeric_cols if c != scatter_y]
+        scatter_x = other_nums[0]
         return ChartSpec(
             chart_type="scatter",
-            x_col=numeric_cols[0],
-            y_col=numeric_cols[1],
-            title=f"{_human_label(numeric_cols[1])} vs {_human_label(numeric_cols[0])}",
+            x_col=scatter_x,
+            y_col=scatter_y,
+            title=f"{_human_label(scatter_y)} vs {_human_label(scatter_x)}",
         )
 
-    return ChartSpec(chart_type="none", title="Summary Result")
+    return ChartSpec(
+        chart_type="histogram",
+        x_col=y_col,
+        y_col=y_col,
+        title=f"{_human_label(y_col)} Frequency Distribution",
+    )
 
 
 def _resolve_heatmap_columns(df: pd.DataFrame, spec: ChartSpec) -> tuple[str, str, str] | None:
@@ -713,6 +1186,7 @@ def _resolve_heatmap_columns(df: pd.DataFrame, spec: ChartSpec) -> tuple[str, st
     numeric_cols, dimension_cols, _ = _identify_columns(df)
     if not numeric_cols:
         return None
+    numeric_set = set(numeric_cols)
 
     # Honor explicit spec columns if they supply two dimensions and one numeric value column
     if (
@@ -722,16 +1196,40 @@ def _resolve_heatmap_columns(df: pd.DataFrame, spec: ChartSpec) -> tuple[str, st
         and spec.x_col != spec.y_col
         and spec.color_col not in (spec.x_col, spec.y_col)
     ):
-        if pd.api.types.is_numeric_dtype(df[spec.y_col]) and not pd.api.types.is_numeric_dtype(df[spec.x_col]):
+        if spec.y_col in numeric_set and spec.x_col not in numeric_set:
             return spec.x_col, spec.color_col, spec.y_col
-        if pd.api.types.is_numeric_dtype(df[spec.color_col]) and not pd.api.types.is_numeric_dtype(df[spec.y_col]):
+        if spec.color_col in numeric_set and spec.y_col not in numeric_set:
             return spec.x_col, spec.y_col, spec.color_col
 
     if len(dimension_cols) >= 2:
-        val_col = spec.y_col if (spec.y_col in cols and pd.api.types.is_numeric_dtype(df[spec.y_col])) else numeric_cols[0]
+        val_col = spec.y_col if spec.y_col in numeric_set else numeric_cols[0]
         return dimension_cols[0], dimension_cols[1], val_col
 
     return None
+
+
+def _is_chart_spec_valid(df: pd.DataFrame, spec: ChartSpec) -> tuple[bool, tuple[str, str, str] | None]:
+    """Validate `spec` against `df` columns and resolve heatmap axes when applicable."""
+    if spec.chart_type == "none":
+        return False, None
+    cols = set(df.columns)
+    if spec.chart_type == "heatmap":
+        heat_cols = _resolve_heatmap_columns(df, spec)
+        return (heat_cols is not None), heat_cols
+    if spec.chart_type in ("box", "violin"):
+        ok = bool(spec.y_col and spec.y_col in cols and _is_numeric_non_bool(df[spec.y_col]))
+        return ok, None
+    if spec.chart_type == "histogram":
+        ok = bool(spec.x_col and spec.x_col in cols and _is_numeric_non_bool(df[spec.x_col]))
+        return ok, None
+    ok = bool(
+        spec.x_col
+        and spec.x_col in cols
+        and spec.y_col
+        and spec.y_col in cols
+        and _is_numeric_non_bool(df[spec.y_col])
+    )
+    return ok, None
 
 
 def build_plotly_chart(
@@ -759,28 +1257,12 @@ def build_plotly_chart(
 
     # Validate columns against actual DataFrame; fallback seamlessly if mismatched
     cols = set(df.columns)
-    heat_cols: tuple[str, str, str] | None = None
-    if spec.chart_type == "heatmap":
-        heat_cols = _resolve_heatmap_columns(df, spec)
-        if heat_cols is None:
-            spec = infer_default_chart_spec(df, question=question)
-            if spec.chart_type == "none" or spec.chart_type == "heatmap":
-                return None
-    if spec.chart_type in ("box", "violin"):
-        if spec.y_col not in cols or not pd.api.types.is_numeric_dtype(df[spec.y_col]):
-            spec = infer_default_chart_spec(df, question=question)
-            if spec.chart_type == "none" or spec.y_col not in cols:
-                return None
-    elif spec.chart_type == "histogram":
-        if spec.x_col not in cols or not pd.api.types.is_numeric_dtype(df[spec.x_col]):
-            spec = infer_default_chart_spec(df, question=question)
-            if spec.chart_type == "none" or spec.x_col not in cols:
-                return None
-    elif spec.chart_type != "heatmap":
-        if spec.x_col not in cols or spec.y_col not in cols or not pd.api.types.is_numeric_dtype(df[spec.y_col]):
-            spec = infer_default_chart_spec(df, question=question)
-            if spec.chart_type == "none" or spec.x_col not in cols or spec.y_col not in cols:
-                return None
+    is_valid, heat_cols = _is_chart_spec_valid(df, spec)
+    if not is_valid:
+        spec = infer_default_chart_spec(df, question=question)
+        is_valid, heat_cols = _is_chart_spec_valid(df, spec)
+        if not is_valid:
+            return None
 
     color_col = spec.color_col if (spec.color_col and spec.color_col in cols and spec.color_col != spec.x_col) else None
 
@@ -798,10 +1280,7 @@ def build_plotly_chart(
         labels[color_col] = _human_label(color_col)
 
     try:
-        is_money = any(k in spec.y_col.lower() for k in ("revenue", "profit", "sales", "amount", "price", "cost"))
-        is_pct = any(k in spec.y_col.lower() for k in ("pct", "percent", "margin", "rate", "share"))
-        y_prefix = "$" if is_money else ""
-        y_suffix = "%" if is_pct else ""
+        y_prefix, y_suffix = get_metric_unit_affixes(spec.y_col)
 
         if spec.chart_type == "bar":
             show_data_labels = len(plot_df) <= 16 and color_col is None
@@ -987,9 +1466,14 @@ def build_plotly_chart(
         elif spec.chart_type == "treemap":
             path_cols = [c for c in [color_col, spec.x_col] if c and c in plot_df.columns]
             if not path_cols:
-                path_cols = [spec.x_col]
+                return None
+            treemap_df = plot_df.dropna(subset=path_cols)
+            treemap_vals = pd.to_numeric(treemap_df[spec.y_col], errors="coerce")
+            treemap_df = treemap_df[treemap_vals.fillna(0) > 0]
+            if treemap_df.empty:
+                return None
             fig = px.treemap(
-                plot_df,
+                treemap_df,
                 path=path_cols,
                 values=spec.y_col,
                 color_discrete_sequence=CHART_PALETTE,
@@ -1018,6 +1502,8 @@ def build_plotly_chart(
             )
 
         elif spec.chart_type == "funnel":
+            if not spec.x_col or spec.x_col not in plot_df.columns:
+                return None
             fig = px.funnel(
                 plot_df,
                 x=spec.y_col,

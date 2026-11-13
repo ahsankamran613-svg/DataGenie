@@ -373,7 +373,7 @@ Write Python code that creates an interactive, high-contrast Plotly figure and a
 
 CRITICAL CODING RULES:
 1. The DataFrame is ALREADY provided in variable `df`. Do NOT redefine, mock, or read `df`.
-2. ONLY use `px` (plotly.express), `go` (plotly.graph_objects), `pd` (pandas), or `np` (numpy).
+2. ONLY use `px` (plotly.express), `go` (plotly.graph_objects), `pd` (pandas), or `np` (numpy). Do NOT import `statsmodels` or pass `trendline='ols'` / `trendline='lowess'` to `px.scatter` (`statsmodels` is not installed; compute regression lines manually with `np.polyfit` if needed).
 3. If the user asked for a box plot, use `fig = px.box(df, x=..., y=..., points='outliers')`. If values are heavily right-skewed (max is > 5x the median or 75th percentile), set `log_y=True` so the box plot is readable rather than flattened into a thin line!
 4. If the user asked for a histogram, use `fig = px.histogram(df, x=...)`.
 5. If the user asked for a violin plot, use `fig = px.violin(df, x=..., y=..., box=True, points='outliers')`.

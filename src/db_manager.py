@@ -31,7 +31,6 @@ FORBIDDEN_SQL_KEYWORDS = (
     "ALTER",
     "TRUNCATE",
     "CREATE",
-    "REPLACE",
     "GRANT",
     "REVOKE",
     "ATTACH",
@@ -49,6 +48,32 @@ _FORBIDDEN_PATTERN = re.compile(
     r"\b(" + "|".join(FORBIDDEN_SQL_KEYWORDS) + r")\b",
     flags=re.IGNORECASE,
 )
+# Allow SQL scalar function REPLACE(str, old, new), while blocking REPLACE INTO / CREATE OR REPLACE
+_FORBIDDEN_REPLACE_PATTERN = re.compile(r"\b(REPLACE)\b(?!\s*\()", flags=re.IGNORECASE)
+
+_SQL_TOKEN_OR_COMMENT_RE = re.compile(
+    r"('(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|`(?:[^`]|``)*`)|(/\*.*?\*/|--[^\r\n]*)",
+    flags=re.DOTALL,
+)
+_SQL_QUOTED_SEGMENT_RE = re.compile(
+    r"'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|`(?:[^`]|``)*`",
+    flags=re.DOTALL,
+)
+
+_SQL_TEMPORAL_TYPE_RE = re.compile(
+    r"\b(?:DATE|DATETIME|TIMESTAMP|TIME|TIMETZ|TIMESTAMPTZ)\b",
+    flags=re.IGNORECASE,
+)
+_SQL_BOOL_TYPE_RE = re.compile(r"\bBOOL(?:EAN)?\b", flags=re.IGNORECASE)
+_SQL_INT_TYPE_RE = re.compile(
+    r"\b(?:(?:TINY|SMALL|MEDIUM|BIG)?INT(?:EGER)?|INT2|INT4|INT8|(?:SMALL|BIG)?SERIAL)\b",
+    flags=re.IGNORECASE,
+)
+_SQL_REAL_TYPE_RE = re.compile(
+    r"\b(?:FLOAT|FLOAT4|FLOAT8|REAL|DOUBLE(?:\s+PRECISION)?|NUMERIC|DECIMAL)\b",
+    flags=re.IGNORECASE,
+)
+_DATE_COLUMN_NAME_TOKENS: frozenset[str] = frozenset({"date", "datetime", "timestamp"})
 
 
 def normalize_database_url(db_url: str) -> str:
@@ -75,15 +100,31 @@ def sanitize_identifier(name: str, fallback: str = "sales_data") -> str:
 
 
 def _strip_sql_comments_and_fences(sql: str) -> str:
-    """Strip markdown code blocks and SQL comments before AST/keyword validation."""
+    """Strip markdown code blocks and SQL comments (preserving quoted literals/identifiers)."""
     s = sql.strip()
     # Remove ```sql ... ``` fences if present
     s = re.sub(r"^```(?:sql|postgresql|sqlite)?\s*", "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s*```$", "", s)
-    # Remove /* ... */ block comments and -- line comments
-    s = re.sub(r"/\*.*?\*/", " ", s, flags=re.DOTALL)
-    s = re.sub(r"--[^\r\n]*", " ", s)
+    # Remove /* ... */ block comments and -- line comments outside quotes
+    s = _SQL_TOKEN_OR_COMMENT_RE.sub(
+        lambda m: m.group(1) if m.group(1) is not None else " ",
+        s,
+    )
     return s.strip().rstrip(";").strip()
+
+
+def _mask_sql_literals_and_identifiers(sql: str) -> str:
+    """Neutralize single-quoted literals and quoted identifiers for safe keyword scanning."""
+
+    def _repl(match: re.Match[str]) -> str:
+        token = match.group(0)
+        if token.startswith("'"):
+            return " '' "
+        if token.startswith('"'):
+            return ' "" '
+        return " `` "
+
+    return _SQL_QUOTED_SEGMENT_RE.sub(_repl, sql)
 
 
 def validate_readonly_sql(sql: str) -> str:
@@ -92,15 +133,15 @@ def validate_readonly_sql(sql: str) -> str:
     if not cleaned:
         raise UnsafeQueryError("SQL query cannot be empty.")
 
-    # Block stacked multi-statement SQL injection (any internal semicolon outside literals)
-    without_single_quotes = re.sub(r"'([^']|'')*'", "''", cleaned)
-    if ";" in without_single_quotes:
+    # Neutralize string literals ('...') and quoted identifiers ("..." / `...`) before scanning
+    scanned = _mask_sql_literals_and_identifiers(cleaned)
+    if ";" in scanned:
         raise UnsafeQueryError("Multiple SQL statements are not permitted in read-only mode.")
 
-    if not re.match(r"^(SELECT|WITH)\b", without_single_quotes, flags=re.IGNORECASE):
+    if not re.match(r"^\s*(SELECT|WITH)\b", scanned, flags=re.IGNORECASE):
         raise UnsafeQueryError("Only read-only SELECT (or WITH ... SELECT) queries are permitted.")
 
-    match = _FORBIDDEN_PATTERN.search(without_single_quotes)
+    match = _FORBIDDEN_PATTERN.search(scanned) or _FORBIDDEN_REPLACE_PATTERN.search(scanned)
     if match:
         keyword = match.group(1).upper()
         raise UnsafeQueryError(
@@ -111,16 +152,21 @@ def validate_readonly_sql(sql: str) -> str:
 
 
 def _badge_type(col_name: str, raw_type: str) -> str:
-    """Map SQLAlchemy column type strings to clean UI badge labels (`DATE`, `TEXT`, `REAL`, `INT`)."""
-    upper = raw_type.upper()
-    if "DATE" in upper or "TIME" in upper or "date" in col_name.lower():
+    """Map SQLAlchemy column type strings to clean UI badge labels (`DATE`, `TEXT`, `REAL`, `INT`, `BOOL`)."""
+    upper = str(raw_type).upper()
+    if _SQL_TEMPORAL_TYPE_RE.search(upper):
         return "DATE"
-    if any(tok in upper for tok in ("INT", "BIGINT", "SMALLINT", "SERIAL")):
-        return "INT"
-    if any(tok in upper for tok in ("FLOAT", "REAL", "DOUBLE", "NUMERIC", "DECIMAL")):
-        return "REAL"
-    if "BOOL" in upper:
+    if _SQL_BOOL_TYPE_RE.search(upper):
         return "BOOL"
+    if _SQL_INT_TYPE_RE.search(upper):
+        return "INT"
+    if _SQL_REAL_TYPE_RE.search(upper):
+        return "REAL"
+
+    snake_name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(col_name))
+    tokens = {tok for tok in re.split(r"[^a-z0-9]+", snake_name.lower()) if tok}
+    if tokens & _DATE_COLUMN_NAME_TOKENS:
+        return "DATE"
     return "TEXT"
 
 
@@ -278,7 +324,7 @@ class DatabaseManager:
                             ).fetchone()
                             if bounds and bounds[0] is not None:
                                 extra = f" [date range: '{bounds[0]}' to '{bounds[1]}']"
-                        elif badge == "TEXT" and not c_name.endswith("_id"):
+                        elif badge == "TEXT" and c_name.lower() != "id" and not c_name.lower().endswith("_id"):
                             distinct_count = int(
                                 conn.execute(
                                     text(f"SELECT COUNT(DISTINCT {safe_col}) FROM {safe_tbl}")

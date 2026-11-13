@@ -36,6 +36,7 @@ from src.eda_engine import (
     extract_key_correlations,
     find_default_timeseries_columns,
 )
+from src.stats_analyzer import get_quantitative_numeric_columns
 from src.ui import (
     APP_CSS,
     brand_html,
@@ -617,7 +618,7 @@ def render_data_health_tab() -> None:
 
     # 2. Anomaly detection
     default_date, default_metric = find_default_timeseries_columns(clean_df)
-    numeric_cols = [c for c in clean_df.columns if pd.api.types.is_numeric_dtype(clean_df[c])]
+    numeric_cols = get_quantitative_numeric_columns(clean_df)
 
     if default_date and numeric_cols:
         st.markdown(

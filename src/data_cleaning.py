@@ -12,6 +12,31 @@ import re
 import numpy as np
 import pandas as pd
 
+from src.stats_analyzer import is_binary_bool_indicator, is_id_or_code_column, tokenize_col_name
+
+
+MISSING_TOKEN_PATTERN = r"(?i)^\s*(?:nan|null|none|n/a|na|-|--)?\s*$"
+TIME_ONLY_PATTERN = r"^\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[AaPp][Mm])?$"
+MONTH_BUCKET_PATTERN = r"^\d{4}[-/]\d{1,2}$"
+DATE_LIKE_PATTERN = (
+    r"^(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[T\s]\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+    r"|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}(?:\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[AaPp][Mm])?)?"
+    r"|\d{1,2}\.\d{1,2}\.\d{4}(?:\s+\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?"
+    r"|[A-Za-z]{3,9}[-\s]\d{1,2},?[-\s]\d{4}"
+    r"|\d{1,2}[-\s][A-Za-z]{3,9},?[-\s]\d{4})$"
+)
+DATE_NAME_HINT_TOKENS: frozenset[str] = frozenset(
+    {"date", "dt", "time", "day", "month", "created", "updated"}
+)
+MAX_TIME_ONLY_RATIO = 0.30
+MIN_MONTH_BUCKET_RATIO = 0.50
+MIN_DATE_HINT_RATIO = 0.50
+MIN_DATE_NO_HINT_RATIO = 0.75
+MIN_DATE_PARSED_RATIO = 0.80
+MIN_NUMERIC_PARSED_RATIO = 0.80
+ISO_DATE_FORMAT = "%Y-%m-%d"
+ISO_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 
 @dataclass
 class CleaningAction:
@@ -68,8 +93,8 @@ def _is_text_series(series: pd.Series) -> bool:
 
 
 def _looks_like_id_column(col_name: str, series: pd.Series) -> bool:
-    """Prevent ID/code columns (e.g., ORD-10001, SKU-200) from being parsed as dates or floats."""
-    if col_name == "id" or col_name.endswith("_id") or col_name.endswith("_code"):
+    """Prevent ID/code columns (e.g., ORD-10001, SKU-200, zip_code) from being parsed as dates or floats."""
+    if is_id_or_code_column(col_name):
         return True
     non_null = series.dropna().astype(str).str.strip()
     if non_null.empty:
@@ -82,75 +107,147 @@ def _looks_like_id_column(col_name: str, series: pd.Series) -> bool:
 def _try_convert_dirty_numeric(series: pd.Series) -> pd.Series | None:
     """Strip currency/percentage/comma symbols from text series and convert to float if >=80% valid."""
     non_null = series.dropna().astype(str).str.strip()
+    non_null = non_null[non_null != ""]
     if non_null.empty:
         return None
 
-    # Must contain digits and mostly numeric/currency characters
+    # Unwrap accounting negatives ($120.00) -> -$120.00 before stripping leading currency symbols
     stripped = (
         series.astype("string")
         .str.strip()
-        .str.replace(r"^[\$€£¥]\s*", "", regex=True)
+        .str.replace(r"^([+-]?)\s*[\$€£¥]\s*", r"\1", regex=True)
+        .str.replace(r"^\(\s*(.*?)\s*\)$", r"-\1", regex=True)
+        .str.replace(r"^([+-]?)\s*[\$€£¥]\s*", r"\1", regex=True)
         .str.replace(r"\s*[%]$", "", regex=True)
         .str.replace(",", "", regex=False)
-        .str.replace(r"^\((.*)\)$", r"-\1", regex=True)  # accounting negatives ($120.00) -> -120.00
     )
 
     converted = pd.to_numeric(stripped, errors="coerce")
     valid_ratio = float(converted.notna().sum()) / float(len(non_null))
-    if valid_ratio >= 0.80:
+    if valid_ratio >= MIN_NUMERIC_PARSED_RATIO:
         return converted.astype("float64")
     return None
 
 
-def _try_parse_mixed_dates(col_name: str, series: pd.Series) -> tuple[pd.Series, int] | None:
-    """Detect and normalize mixed date strings into ISO `YYYY-MM-DD` strings."""
-    date_name_hint = any(
-        token in col_name for token in ("date", "dt", "time", "day", "month", "created", "updated")
+def _infer_dayfirst(values: pd.Series) -> bool:
+    """Infer day-first vs month-first across slash/dash numeric dates in a column."""
+    dd_first_evidence = 0
+    mm_first_evidence = 0
+    dash_count = 0
+    slash_count = 0
+
+    extracted = values.astype(str).str.extract(
+        r"^(\d{1,2})([-/.])(\d{1,2})\2(\d{2,4})(?:\s.*)?$"
     )
+    for _, row in extracted.dropna().iterrows():
+        p1 = int(row[0])
+        sep = str(row[1])
+        p2 = int(row[2])
+        if sep == "-":
+            dash_count += 1
+        elif sep == "/":
+            slash_count += 1
+        if p1 > 12 and 1 <= p2 <= 12:
+            dd_first_evidence += 1
+        elif p2 > 12 and 1 <= p1 <= 12:
+            mm_first_evidence += 1
+
+    if dd_first_evidence > mm_first_evidence:
+        return True
+    if mm_first_evidence > dd_first_evidence:
+        return False
+    return dash_count >= slash_count
+
+
+def _parse_datetime_series(s_vals: pd.Series, *, dayfirst: bool) -> pd.Series:
+    """Parse date/datetime strings safely, normalizing timezone-aware values to naive UTC."""
+    try:
+        parsed = pd.to_datetime(
+            s_vals,
+            format="mixed",
+            dayfirst=dayfirst,
+            errors="coerce",
+        )
+    except ValueError:
+        parsed = pd.to_datetime(
+            s_vals,
+            format="mixed",
+            dayfirst=dayfirst,
+            utc=True,
+            errors="coerce",
+        )
+    if isinstance(parsed.dtype, pd.DatetimeTZDtype):
+        parsed = parsed.dt.tz_convert("UTC").dt.tz_localize(None)
+    return parsed.astype("datetime64[us]")
+
+
+def _format_parsed_datetimes(parsed: pd.Series) -> pd.Series:
+    """Format parsed datetimes as ISO date or ISO datetime when sub-day time components exist."""
+    if isinstance(parsed.dtype, pd.DatetimeTZDtype):
+        parsed = parsed.dt.tz_convert("UTC").dt.tz_localize(None)
+    non_nat = parsed.dropna()
+    has_subday_time = bool(
+        ((non_nat.dt.hour != 0) | (non_nat.dt.minute != 0) | (non_nat.dt.second != 0)).any()
+    )
+    fmt = ISO_DATETIME_FORMAT if has_subday_time else ISO_DATE_FORMAT
+    return parsed.dt.strftime(fmt)
+
+
+def _try_parse_mixed_dates(col_name: str, series: pd.Series) -> tuple[pd.Series, int] | None:
+    """Detect and normalize mixed date/datetime strings into ISO strings."""
+    col_tokens = set(tokenize_col_name(col_name))
+    date_name_hint = bool(col_tokens & DATE_NAME_HINT_TOKENS)
     non_null = series.dropna().astype(str).str.strip()
+    non_null = non_null[non_null != ""]
     if non_null.empty:
         return None
 
-    # Quick pattern check so arbitrary text columns aren't tested unnecessarily
-    date_pattern_ratio = float(
-        non_null.str.match(
-            r"^(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})"
-        ).mean()
-    )
-    if not date_name_hint and date_pattern_ratio < 0.75:
+    # Do not convert time-only columns (e.g. "09:15") into today's date
+    time_only_ratio = float(non_null.str.match(TIME_ONLY_PATTERN).mean())
+    if time_only_ratio >= MAX_TIME_ONLY_RATIO:
         return None
-    if date_pattern_ratio < 0.50 and not date_name_hint:
+
+    # Do not expand YYYY-MM month buckets into YYYY-MM-01 dates
+    month_bucket_ratio = float(non_null.str.match(MONTH_BUCKET_PATTERN).mean())
+    if month_bucket_ratio >= MIN_MONTH_BUCKET_RATIO:
+        return None
+
+    # Quick pattern check so arbitrary text columns aren't tested unnecessarily
+    date_pattern_ratio = float(non_null.str.match(DATE_LIKE_PATTERN).mean())
+    min_required = MIN_DATE_HINT_RATIO if date_name_hint else MIN_DATE_NO_HINT_RATIO
+    if date_pattern_ratio < min_required:
         return None
 
     s_clean = series.astype("string").str.strip()
-    iso_year_first_mask = s_clean.str.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}").fillna(False)
+    iso_year_first_mask = s_clean.str.match(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}").fillna(False)
 
-    parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[us]")
 
     if iso_year_first_mask.any():
-        parsed_year_first = pd.to_datetime(
-            s_clean.loc[iso_year_first_mask].str.replace("/", "-", regex=False),
-            format="mixed",
-            dayfirst=False,
-            errors="coerce",
+        iso_vals = s_clean.loc[iso_year_first_mask].str.replace(
+            r"^(\d{4})[/.](\d{1,2})[/.](\d{1,2})",
+            r"\1-\2-\3",
+            regex=True,
         )
-        parsed.loc[iso_year_first_mask] = parsed_year_first
+        parsed.loc[iso_year_first_mask] = _parse_datetime_series(iso_vals, dayfirst=False)
 
-    other_mask = (~iso_year_first_mask) & s_clean.notna() & (s_clean != "")
+    non_date_mask = (
+        s_clean.str.match(TIME_ONLY_PATTERN).fillna(False)
+        | s_clean.str.match(MONTH_BUCKET_PATTERN).fillna(False)
+    )
+    other_mask = (~iso_year_first_mask) & (~non_date_mask) & s_clean.notna() & (s_clean != "")
     if other_mask.any():
-        parsed_other = pd.to_datetime(
+        inferred_dayfirst = _infer_dayfirst(s_clean.loc[other_mask])
+        parsed.loc[other_mask] = _parse_datetime_series(
             s_clean.loc[other_mask],
-            format="mixed",
-            dayfirst=True,
-            errors="coerce",
+            dayfirst=inferred_dayfirst,
         )
-        parsed.loc[other_mask] = parsed_other
 
     valid_ratio = float(parsed.notna().sum()) / float(len(non_null))
-    if valid_ratio < 0.80:
+    if valid_ratio < MIN_DATE_PARSED_RATIO:
         return None
 
-    normalized = parsed.dt.strftime("%Y-%m-%d")
+    normalized = _format_parsed_datetimes(parsed)
     changed_count = int((normalized.notna() & (normalized != s_clean)).sum())
     return normalized, changed_count
 
@@ -250,18 +347,18 @@ def clean_dataframe(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, CleaningReport]
     # 3. Inspect text columns for dirty dates, dirty currency/percent numbers, or messy categories
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]):
-            df[col] = df[col].dt.strftime("%Y-%m-%d")
+            df[col] = _format_parsed_datetimes(df[col])
             date_normalized.append(col)
             continue
 
         if not _is_text_series(df[col]):
             continue
 
-        # Replace blank/whitespace-only strings and 'null'/'N/A' tokens with NA
+        # Replace blank/whitespace-only strings and case-insensitive 'null'/'N/A'/'None' tokens with NA
         cleaned_tokens = (
             df[col]
             .astype("string")
-            .replace(r"^\s*(?:nan|null|none|n/a|na|-|--)?\s*$", pd.NA, regex=True)
+            .replace(MISSING_TOKEN_PATTERN, pd.NA, regex=True)
         )
         df[col] = cleaned_tokens
 
@@ -276,11 +373,13 @@ def clean_dataframe(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, CleaningReport]
             norm_dates, changed_dates = date_result
             df[col] = norm_dates
             date_normalized.append(col)
+            has_time_fmt = bool(norm_dates.dropna().astype(str).str.contains(":").any())
+            iso_fmt_label = "ISO YYYY-MM-DD HH:MM:SS" if has_time_fmt else "ISO YYYY-MM-DD"
             actions.append(
                 CleaningAction(
                     icon="📅",
                     category="dates",
-                    message=f"Normalized mixed date formats in `{col}` to ISO YYYY-MM-DD",
+                    message=f"Normalized mixed date formats in `{col}` to {iso_fmt_label}",
                     affected_count=max(changed_dates, int(norm_dates.notna().sum())),
                 )
             )
@@ -339,16 +438,66 @@ def clean_dataframe(raw_df: pd.DataFrame) -> tuple[pd.DataFrame, CleaningReport]
         if null_count == 0:
             continue
 
-        if pd.api.types.is_numeric_dtype(df[col]):
-            median_val = float(df[col].median()) if df[col].notna().any() else 0.0
-            if np.isnan(median_val):
-                median_val = 0.0
-            df[col] = df[col].fillna(round(median_val, 2))
+        if pd.api.types.is_bool_dtype(df[col]):
+            mode_series = df[col].mode(dropna=True)
+            fill_bool = bool(mode_series.iloc[0]) if not mode_series.empty else False
+            df[col] = df[col].fillna(fill_bool)
             actions.append(
                 CleaningAction(
                     icon="🩹",
                     category="imputation",
-                    message=f"Imputed {null_count} missing values in `{col}` with median ({median_val:.2f})",
+                    message=f"Filled {null_count} missing boolean values in `{col}` with mode ({fill_bool})",
+                    affected_count=null_count,
+                )
+            )
+        elif is_binary_bool_indicator(col, df[col]):
+            mode_series = df[col].mode(dropna=True)
+            fill_flag = int(mode_series.iloc[0]) if not mode_series.empty else 0
+            df[col] = df[col].fillna(fill_flag)
+            actions.append(
+                CleaningAction(
+                    icon="🩹",
+                    category="imputation",
+                    message=f"Filled {null_count} missing boolean indicator values in `{col}` with mode ({fill_flag})",
+                    affected_count=null_count,
+                )
+            )
+        elif _looks_like_id_column(col, df[col]):
+            if _is_text_series(df[col]):
+                df[col] = df[col].fillna("Unknown")
+                actions.append(
+                    CleaningAction(
+                        icon="🩹",
+                        category="imputation",
+                        message=f"Filled {null_count} missing identifier values in `{col}` with 'Unknown'",
+                        affected_count=null_count,
+                    )
+                )
+            else:
+                actions.append(
+                    CleaningAction(
+                        icon="🆔",
+                        category="imputation",
+                        message=f"Preserved {null_count} missing values in identifier column `{col}` as NULL (skipped median imputation)",
+                        affected_count=null_count,
+                    )
+                )
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            median_val = float(df[col].median()) if df[col].notna().any() else 0.0
+            if np.isnan(median_val):
+                median_val = 0.0
+            if pd.api.types.is_integer_dtype(df[col]):
+                fill_val: int | float = int(round(median_val))
+                fill_label = str(fill_val)
+            else:
+                fill_val = round(median_val, 2)
+                fill_label = f"{fill_val:.2f}"
+            df[col] = df[col].fillna(fill_val)
+            actions.append(
+                CleaningAction(
+                    icon="🩹",
+                    category="imputation",
+                    message=f"Imputed {null_count} missing values in `{col}` with median ({fill_label})",
                     affected_count=null_count,
                 )
             )

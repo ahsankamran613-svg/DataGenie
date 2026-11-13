@@ -15,6 +15,14 @@ from typing import Any
 import pandas as pd
 
 from src.eda_engine import find_default_timeseries_columns
+from src.stats_analyzer import (
+    KPI_COMPACT_K_THRESHOLD,
+    PREFERRED_ADDITIVE_METRIC_TOKENS,
+    format_metric_value,
+    get_quantitative_numeric_columns,
+    is_non_additive_metric,
+    tokenize_col_name,
+)
 
 
 APP_CSS = """
@@ -638,18 +646,9 @@ class Kpi:
     help: str | None = None
 
 
-def _fmt_number(val: float, money: bool = False) -> str:
-    sign = "-" if val < 0 else ""
-    a = abs(val)
-    prefix = "$" if money else ""
-    if a >= 1_000_000:
-        return f"{sign}{prefix}{a / 1_000_000:.2f}M"
-    elif a >= 10_000:
-        return f"{sign}{prefix}{a / 1_000:.1f}K"
-    elif float(a).is_integer():
-        return f"{sign}{prefix}{int(a):,}"
-    else:
-        return f"{sign}{prefix}{a:,.1f}"
+def _fmt_number(val: float, money: bool = False, pct: bool = False) -> str:
+    col_hint = "pct" if pct else ("revenue" if money else "value")
+    return format_metric_value(val, col_hint, compact_k_threshold=KPI_COMPACT_K_THRESHOLD)
 
 
 def compute_headline_kpis(df: pd.DataFrame | None, max_metrics: int = 3) -> list[Kpi]:
@@ -658,13 +657,19 @@ def compute_headline_kpis(df: pd.DataFrame | None, max_metrics: int = 3) -> list
         return []
 
     date_col, _ = find_default_timeseries_columns(df)
-    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    numeric_cols = get_quantitative_numeric_columns(df)
+    additive_cols = [c for c in numeric_cols if not is_non_additive_metric(c)]
+    non_additive_cols = [c for c in numeric_cols if is_non_additive_metric(c)]
 
-    preferred = ("revenue", "sales", "amount", "profit", "units", "quantity", "orders", "total")
     ranked: list[str] = []
-    for pref in preferred:
-        ranked += [c for c in numeric_cols if pref in c.lower() and c not in ranked]
-    ranked += [c for c in numeric_cols if c not in ranked and not c.lower().endswith(("_pct", "_days", "_id"))]
+    for pref in PREFERRED_ADDITIVE_METRIC_TOKENS:
+        ranked += [
+            c
+            for c in additive_cols
+            if pref in tokenize_col_name(c) and c not in ranked
+        ]
+    ranked += [c for c in additive_cols if c not in ranked]
+    ranked += [c for c in non_additive_cols if c not in ranked]
     metrics = ranked[:max_metrics]
 
     kpis: list[Kpi] = []
@@ -672,27 +677,40 @@ def compute_headline_kpis(df: pd.DataFrame | None, max_metrics: int = 3) -> list
     if date_col and metrics:
         dates = pd.to_datetime(df[date_col], format="mixed", errors="coerce")
         work = df.assign(_period=dates.dt.to_period("M")).dropna(subset=["_period"])
-        monthly = work.groupby("_period")[metrics].sum(numeric_only=True).sort_index()
+        agg_map = {
+            col: ("mean" if is_non_additive_metric(col) else "sum")
+            for col in metrics
+        }
+        monthly = work.groupby("_period").agg(agg_map).sort_index()
         counts = work.groupby("_period").size().sort_index()
 
         if len(monthly) >= 1:
             latest = monthly.index[-1]
             prior_label = f"vs {monthly.index[-2].strftime('%b')}" if len(monthly) >= 2 else None
             for col in metrics:
-                series = monthly[col].astype(float)
+                series = pd.to_numeric(monthly[col], errors="coerce").astype(float)
                 cur = float(series.iloc[-1])
                 delta = None
-                if len(series) >= 2 and float(series.iloc[-2]) != 0:
+                if (
+                    len(series) >= 2
+                    and pd.notna(cur)
+                    and pd.notna(series.iloc[-2])
+                    and float(series.iloc[-2]) != 0
+                ):
                     delta = f"{(cur - float(series.iloc[-2])) / abs(float(series.iloc[-2])) * 100:+.1f}%"
-                money = any(k in col.lower() for k in ("revenue", "sales", "amount", "profit", "price", "cost"))
+                agg_word = "average" if is_non_additive_metric(col) else "sum"
                 kpis.append(
                     Kpi(
                         label=f"{col.replace('_', ' ').title()} ({latest.strftime('%b %Y')})",
-                        value=_fmt_number(cur, money=money),
+                        value=format_metric_value(
+                            cur,
+                            col,
+                            compact_k_threshold=KPI_COMPACT_K_THRESHOLD,
+                        ),
                         delta=delta,
                         delta_description=prior_label,
-                        chart=[round(float(v), 2) for v in series.tolist()],
-                        help=f"Monthly sum of `{col}`; sparkline shows entire dataset range.",
+                        chart=[round(float(v), 2) if pd.notna(v) else 0.0 for v in series.tolist()],
+                        help=f"Monthly {agg_word} of `{col}`; sparkline shows entire dataset range.",
                     )
                 )
             cur_n = int(counts.iloc[-1])

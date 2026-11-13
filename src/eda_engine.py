@@ -15,7 +15,16 @@ import pandas as pd
 import plotly.graph_objects as go
 from sklearn.ensemble import IsolationForest
 
-from src.stats_analyzer import apply_neutral_layout
+from src.stats_analyzer import (
+    apply_neutral_layout,
+    get_metric_unit_affixes,
+    get_quantitative_numeric_columns,
+    is_binary_bool_indicator,
+    is_id_or_code_column,
+    is_non_additive_metric,
+    is_quantitative_numeric_series,
+    tokenize_col_name,
+)
 
 
 # Design tokens for dark executive theme
@@ -48,26 +57,28 @@ def find_default_timeseries_columns(df: pd.DataFrame) -> tuple[str | None, str |
             date_col = col
             break
 
-    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    numeric_cols = get_quantitative_numeric_columns(df)
+    additive_cols = [c for c in numeric_cols if not is_non_additive_metric(c)]
+    candidate_cols = additive_cols or numeric_cols
     metric_col: str | None = None
     preferred_names = ("revenue", "sales", "amount", "profit", "total", "units_sold")
     for pref in preferred_names:
-        for col in numeric_cols:
-            if pref in col.lower():
+        for col in candidate_cols:
+            if col.lower() == pref or pref in tokenize_col_name(col):
                 metric_col = col
                 break
         if metric_col is not None:
             break
 
-    if metric_col is None and numeric_cols:
-        metric_col = numeric_cols[0]
+    if metric_col is None and candidate_cols:
+        metric_col = candidate_cols[0]
 
     return date_col, metric_col
 
 
 def compute_dataset_overview(df: pd.DataFrame) -> dict[str, Any]:
     """Compute high-level summary statistics for a DataFrame."""
-    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+    numeric_cols = get_quantitative_numeric_columns(df)
     date_cols = [c for c in df.columns if _is_date_like_series(c, df[c])]
     categorical_cols = [c for c in df.columns if c not in numeric_cols and c not in date_cols]
     total_cells = max(1, int(df.shape[0] * df.shape[1]))
@@ -95,12 +106,20 @@ def compute_column_profiles(df: pd.DataFrame) -> pd.DataFrame:
         nulls = int(s.isna().sum())
         uniques = int(s.nunique(dropna=True))
 
-        if pd.api.types.is_numeric_dtype(s) and s.notna().any():
+        if is_quantitative_numeric_series(col, s) and s.notna().any():
             col_type = "NUMERIC"
             summary = f"min={s.min():,.2f} · mean={s.mean():,.2f} · max={s.max():,.2f}"
         elif _is_date_like_series(col, s) and s.notna().any():
             col_type = "DATE"
             summary = f"{s.min()} → {s.max()}"
+        elif pd.api.types.is_bool_dtype(s) or is_binary_bool_indicator(col, s):
+            col_type = "BOOL"
+            top_vals = s.dropna().astype(str).value_counts().head(3).index.tolist()
+            summary = ", ".join(top_vals) if top_vals else "—"
+        elif is_id_or_code_column(col):
+            col_type = "ID"
+            top_vals = s.dropna().astype(str).value_counts().head(3).index.tolist()
+            summary = ", ".join(top_vals) if top_vals else "—"
         else:
             col_type = "TEXT"
             top_vals = s.dropna().astype(str).value_counts().head(3).index.tolist()
@@ -121,11 +140,11 @@ def compute_column_profiles(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_correlation_matrix(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute the Pearson correlation matrix across numeric columns."""
+    """Compute the Pearson correlation matrix across quantitative numeric columns."""
     numeric_cols = [
         c
-        for c in df.columns
-        if pd.api.types.is_numeric_dtype(df[c]) and df[c].nunique(dropna=True) > 1
+        for c in get_quantitative_numeric_columns(df)
+        if df[c].nunique(dropna=True) > 1
     ]
     if len(numeric_cols) < 2:
         return pd.DataFrame()
@@ -221,6 +240,8 @@ def detect_timeseries_anomalies(
 
     if not date_col or not metric_col or date_col not in df.columns or metric_col not in df.columns:
         raise ValueError("Valid date and numeric metric columns are required for anomaly detection.")
+    if pd.api.types.is_bool_dtype(df[metric_col]) or is_binary_bool_indicator(metric_col, df[metric_col]):
+        raise ValueError(f"Boolean column `{metric_col}` cannot be analyzed as a quantitative time-series metric.")
 
     working = df[[date_col, metric_col]].copy()
     working[date_col] = pd.to_datetime(working[date_col], format="mixed", errors="coerce")
@@ -230,9 +251,13 @@ def detect_timeseries_anomalies(
     if working.empty:
         raise ValueError(f"No valid time-series observations found for `{date_col}` and `{metric_col}`.")
 
+    is_non_add = is_non_additive_metric(metric_col)
+    agg_fn = "mean" if is_non_add else "sum"
+    agg_prefix = "Daily Avg" if is_non_add else "Daily"
+
     ts_df = (
         working.groupby(date_col, as_index=False)[metric_col]
-        .sum()
+        .agg(agg_fn)
         .sort_values(date_col)
         .reset_index(drop=True)
     )
@@ -276,6 +301,7 @@ def detect_timeseries_anomalies(
         ts_df["is_anomaly"] = rolling_z.abs() >= 2.2
 
     metric_label = metric_col.replace("_", " ").title()
+    y_prefix, y_suffix = get_metric_unit_affixes(metric_col)
     anomalies = ts_df[ts_df["is_anomaly"]].copy()
 
     # Calculate statistical confidence corridor (rolling_mean +/- 2 sigma)
@@ -314,12 +340,12 @@ def detect_timeseries_anomalies(
             x=ts_df[date_col],
             y=ts_df[metric_col],
             mode="lines",
-            name=f"Daily {metric_label}",
+            name=f"{agg_prefix} {metric_label}",
             line={"color": "#0284C7", "width": 3.0, "shape": "spline", "smoothing": 0.85},
             fill="tozeroy",
             fillcolor="rgba(2, 132, 199, 0.05)",
             hovertemplate="<b>%{x|%Y-%m-%d}</b><br>"
-            + f"{metric_label}: <b>%{{y:,.2f}}</b><extra></extra>",
+            + f"{metric_label}: <b>{y_prefix}%{{y:,.2f}}{y_suffix}</b><extra></extra>",
         )
     )
 
@@ -331,7 +357,7 @@ def detect_timeseries_anomalies(
             mode="lines",
             name="14-Day Baseline",
             line={"color": COLOR_MUTED, "width": 1.6, "dash": "dash"},
-            hovertemplate="<b>%{x|%Y-%m-%d}</b><br>14d Baseline: <b>%{y:,.2f}</b><extra></extra>",
+            hovertemplate=f"<b>%{{x|%Y-%m-%d}}</b><br>14d Baseline: <b>{y_prefix}%{{y:,.2f}}{y_suffix}</b><extra></extra>",
         )
     )
 
@@ -367,7 +393,7 @@ def detect_timeseries_anomalies(
                     "line": {"color": "#FFFFFF", "width": 2},
                 },
                 hovertemplate="<b>Anomaly · %{x|%Y-%m-%d}</b><br>"
-                + f"{metric_label}: <b>%{{y:,.2f}}</b><br>Deviation: <b>%{{customdata:+.2f}}σ</b><extra></extra>",
+                + f"{metric_label}: <b>{y_prefix}%{{y:,.2f}}{y_suffix}</b><br>Deviation: <b>%{{customdata:+.2f}}σ</b><extra></extra>",
             )
         )
 
@@ -397,7 +423,7 @@ def detect_timeseries_anomalies(
 
     apply_neutral_layout(
         fig,
-        title=f"Daily {metric_label} · {len(anomalies)} Outlier Day(s) Flagged",
+        title=f"{agg_prefix} {metric_label} · {len(anomalies)} Outlier Day(s) Flagged",
         height=400,
         top_margin=88,
     )
